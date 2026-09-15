@@ -50,6 +50,7 @@ class Signal:
     kind: str = "exchange"
     expiry_at: int | None = None
     payout: float | None = None
+    owner_id: int | None = None
 
     @property
     def is_long(self) -> bool:
@@ -116,6 +117,7 @@ def _row_to_signal(row: Any) -> Signal:
         kind=_row_get(row, "kind", "exchange"),
         expiry_at=_row_get(row, "expiry_at", None),
         payout=_row_get(row, "payout", None),
+        owner_id=_row_get(row, "owner_id", None),
     )
 
 
@@ -126,6 +128,17 @@ def _row_get(row: Any, key: str, default: Any) -> Any:
     except (IndexError, KeyError):
         return default
     return default if value is None else value
+
+
+def _owner_clause(owner_id: int | None, prefix: str = " AND") -> tuple[str, list]:
+    """Условие «этот сигнал мой».
+
+    Сигналы, заведённые до разделения по пользователям, имеют owner_id
+    NULL — показываем их всем, иначе прежняя история исчезла бы.
+    """
+    if owner_id is None:
+        return "", []
+    return f"{prefix} (owner_id = ? OR owner_id IS NULL)", [owner_id]
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +161,7 @@ async def create_signal(
     kind: str = "exchange",
     expiry_at: int | None = None,
     payout: float | None = None,
+    owner_id: int | None = None,
 ) -> Signal:
     conn = await db.connect()
     now = int(time.time())
@@ -156,8 +170,8 @@ async def create_signal(
         INSERT INTO signals
             (symbol, side, timeframe, entry, stop_loss, take_profit,
              confidence, reasons, indicators, status, created_at,
-             broker, kind, expiry_at, payout)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             broker, kind, expiry_at, payout, owner_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             symbol,
@@ -175,6 +189,7 @@ async def create_signal(
             kind,
             expiry_at,
             payout,
+            owner_id,
         ),
     )
     await conn.commit()
@@ -190,13 +205,18 @@ async def get_signal(signal_id: int) -> Signal | None:
     return _row_to_signal(row) if row else None
 
 
-async def get_active_signals(symbol: str | None = None) -> list[Signal]:
+async def get_active_signals(
+    symbol: str | None = None, owner_id: int | None = None
+) -> list[Signal]:
     conn = await db.connect()
     sql = "SELECT * FROM signals WHERE status = ?"
     params: list[Any] = [ACTIVE]
     if symbol:
         sql += " AND symbol = ?"
         params.append(symbol)
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     sql += " ORDER BY created_at DESC"
     async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
@@ -209,10 +229,14 @@ async def list_signals(
     symbol: str | None = None,
     status: str | None = None,
     since: int | None = None,
+    owner_id: int | None = None,
 ) -> list[Signal]:
     conn = await db.connect()
     sql = "SELECT * FROM signals WHERE 1=1"
     params: list[Any] = []
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     if symbol:
         sql += " AND symbol = ?"
         params.append(symbol)
@@ -229,10 +253,17 @@ async def list_signals(
     return [_row_to_signal(r) for r in rows]
 
 
-async def count_signals(symbol: str | None = None, status: str | None = None) -> int:
+async def count_signals(
+    symbol: str | None = None,
+    status: str | None = None,
+    owner_id: int | None = None,
+) -> int:
     conn = await db.connect()
     sql = "SELECT COUNT(*) AS n FROM signals WHERE 1=1"
     params: list[Any] = []
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     if symbol:
         sql += " AND symbol = ?"
         params.append(symbol)
@@ -308,13 +339,19 @@ async def mark_notified(signal_id: int) -> None:
     await conn.commit()
 
 
-async def last_signal_at(symbol: str) -> int | None:
-    """Время последнего сигнала по инструменту — для кулдауна."""
+async def last_signal_at(symbol: str, owner_id: int | None = None) -> int | None:
+    """Время последнего сигнала по инструменту — для паузы.
+
+    Пауза личная: сигнал одного получателя не должен затыкать другого.
+    """
     conn = await db.connect()
-    async with conn.execute(
-        "SELECT created_at FROM signals WHERE symbol = ? ORDER BY created_at DESC LIMIT 1",
-        (symbol,),
-    ) as cur:
+    sql = "SELECT created_at FROM signals WHERE symbol = ?"
+    params: list[Any] = [symbol]
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params.append(owner_id)
+    sql += " ORDER BY created_at DESC LIMIT 1"
+    async with conn.execute(sql, params) as cur:
         row = await cur.fetchone()
     return row["created_at"] if row else None
 
@@ -324,7 +361,11 @@ async def last_signal_at(symbol: str) -> int | None:
 # --------------------------------------------------------------------------
 
 
-async def stats(since: int | None = None, symbol: str | None = None) -> dict:
+async def stats(
+    since: int | None = None,
+    symbol: str | None = None,
+    owner_id: int | None = None,
+) -> dict:
     """Сводная статистика по закрытым сигналам.
 
     winrate считается только по сигналам, дошедшим до тейка или стопа.
@@ -339,6 +380,9 @@ async def stats(since: int | None = None, symbol: str | None = None) -> dict:
     if symbol:
         sql += " AND symbol = ?"
         params.append(symbol)
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
 
@@ -351,7 +395,7 @@ async def stats(since: int | None = None, symbol: str | None = None) -> dict:
     gross_profit = sum(s.pnl_pct for s in wins if s.pnl_pct)
     gross_loss = abs(sum(s.pnl_pct for s in losses if s.pnl_pct))
     r_values = [s.r_multiple for s in decided if s.r_multiple is not None]
-    active = await count_signals(symbol=symbol, status=ACTIVE)
+    active = await count_signals(symbol=symbol, status=ACTIVE, owner_id=owner_id)
 
     # Профит-фактор считаем в единицах риска, а не в процентах цены.
     # Трейдер рискует одинаковой суммой на каждом сигнале, а вот ATR-стоп
@@ -398,7 +442,9 @@ def _max_streak(signals: list[Signal], status: str) -> int:
     return best
 
 
-async def stats_by_symbol(since: int | None = None) -> list[dict]:
+async def stats_by_symbol(
+    since: int | None = None, owner_id: int | None = None
+) -> list[dict]:
     conn = await db.connect()
     sql = """
         SELECT symbol,
@@ -413,6 +459,9 @@ async def stats_by_symbol(since: int | None = None) -> list[dict]:
     if since:
         sql += " AND created_at >= ?"
         params.append(since)
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     sql += " GROUP BY symbol ORDER BY total DESC"
     async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
@@ -433,7 +482,9 @@ async def stats_by_symbol(since: int | None = None) -> list[dict]:
     return out
 
 
-async def stats_by_hour(since: int | None = None) -> list[dict]:
+async def stats_by_hour(
+    since: int | None = None, owner_id: int | None = None
+) -> list[dict]:
     """Разбивка по часам суток (UTC) — показывает, когда стратегия работает."""
     conn = await db.connect()
     sql = """
@@ -447,6 +498,9 @@ async def stats_by_hour(since: int | None = None) -> list[dict]:
     if since:
         sql += " AND created_at >= ?"
         params.append(since)
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     sql += " GROUP BY hour ORDER BY hour"
     async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
@@ -466,7 +520,10 @@ async def stats_by_hour(since: int | None = None) -> list[dict]:
     ]
 
 
-async def equity_curve(since: int | None = None, limit: int = 200) -> list[dict]:
+async def equity_curve(
+    since: int | None = None, limit: int = 200,
+    owner_id: int | None = None,
+) -> list[dict]:
     """Накопленный результат в R по закрытым сигналам — для графика."""
     conn = await db.connect()
     sql = """
@@ -478,6 +535,9 @@ async def equity_curve(since: int | None = None, limit: int = 200) -> list[dict]
     if since:
         sql += " AND created_at >= ?"
         params.append(since)
+    clause, extra = _owner_clause(owner_id)
+    sql += clause
+    params += extra
     sql += " ORDER BY closed_at ASC LIMIT ?"
     params.append(limit)
     async with conn.execute(sql, params) as cur:
@@ -593,3 +653,228 @@ async def prune_events(keep: int = 2000) -> None:
         (keep,),
     )
     await conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Уведомления по цене
+#
+# Человек называет уровень — бот сообщает, когда рынок до него дошёл.
+# Это не сигнал и не сделка: ни входа, ни стопа здесь нет, только
+# «сообщи, когда биткоин будет стоить 95 000».
+# --------------------------------------------------------------------------
+
+ALERT_ACTIVE = "ACTIVE"
+ALERT_DONE = "DONE"
+ALERT_CANCELLED = "CANCELLED"
+
+UP = "up"
+DOWN = "down"
+
+
+@dataclass(slots=True)
+class Alert:
+    id: int
+    owner_id: int
+    symbol: str
+    price: float
+    direction: str
+    start_price: float | None
+    note: str
+    repeat: bool
+    status: str
+    created_at: int
+    triggered_at: int | None = None
+    hit_price: float | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == ALERT_ACTIVE
+
+    def reached(self, price: float) -> bool:
+        """Дошла ли цена до заказанного уровня."""
+        if self.direction == UP:
+            return price >= self.price
+        return price <= self.price
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "owner_id": self.owner_id,
+            "symbol": self.symbol,
+            "price": self.price,
+            "direction": self.direction,
+            "start_price": self.start_price,
+            "note": self.note,
+            "repeat": self.repeat,
+            "status": self.status,
+            "created_at": self.created_at,
+            "triggered_at": self.triggered_at,
+            "hit_price": self.hit_price,
+        }
+
+
+def _row_to_alert(row: Any) -> Alert:
+    return Alert(
+        id=row["id"],
+        owner_id=row["owner_id"],
+        symbol=row["symbol"],
+        price=row["price"],
+        direction=row["direction"],
+        start_price=row["start_price"],
+        note=row["note"] or "",
+        repeat=bool(row["repeat"]),
+        status=row["status"],
+        created_at=row["created_at"],
+        triggered_at=row["triggered_at"],
+        hit_price=row["hit_price"],
+    )
+
+
+async def create_alert(
+    *,
+    owner_id: int,
+    symbol: str,
+    price: float,
+    start_price: float | None = None,
+    direction: str | None = None,
+    note: str = "",
+    repeat: bool = False,
+) -> Alert:
+    """Заводит уведомление.
+
+    Сторону определяем сами по текущей цене: человек называет число,
+    а не направление. Если цена уже выше заказанной, ждать её сверху
+    бессмысленно — значит, ждём снижения.
+    """
+    if direction is None:
+        direction = UP if (start_price is None or price >= start_price) else DOWN
+
+    conn = await db.connect()
+    now = int(time.time())
+    cursor = await conn.execute(
+        """
+        INSERT INTO alerts
+            (owner_id, symbol, price, direction, start_price, note,
+             repeat, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (owner_id, symbol, float(price), direction, start_price, note,
+         int(bool(repeat)), ALERT_ACTIVE, now),
+    )
+    await conn.commit()
+    return Alert(
+        id=cursor.lastrowid,
+        owner_id=owner_id,
+        symbol=symbol,
+        price=float(price),
+        direction=direction,
+        start_price=start_price,
+        note=note,
+        repeat=bool(repeat),
+        status=ALERT_ACTIVE,
+        created_at=now,
+    )
+
+
+async def get_alert(alert_id: int) -> Alert | None:
+    conn = await db.connect()
+    async with conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)) as cur:
+        row = await cur.fetchone()
+    return _row_to_alert(row) if row else None
+
+
+async def list_alerts(
+    owner_id: int | None = None,
+    status: str | None = ALERT_ACTIVE,
+    limit: int = 100,
+) -> list[Alert]:
+    conn = await db.connect()
+    sql = "SELECT * FROM alerts WHERE 1 = 1"
+    params: list[Any] = []
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params.append(owner_id)
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with conn.execute(sql, params) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_alert(r) for r in rows]
+
+
+async def active_alert_symbols() -> list[str]:
+    """За какими инструментами вообще нужно следить ради уведомлений."""
+    conn = await db.connect()
+    async with conn.execute(
+        "SELECT DISTINCT symbol FROM alerts WHERE status = ?", (ALERT_ACTIVE,)
+    ) as cur:
+        rows = await cur.fetchall()
+    return [r["symbol"] for r in rows]
+
+
+async def trigger_alert(alert_id: int, price: float) -> Alert | None:
+    """Отмечает срабатывание.
+
+    Повторяющееся уведомление остаётся активным, но его уровень
+    переворачивается: иначе на границе оно зазвонит на каждой проверке.
+    """
+    alert = await get_alert(alert_id)
+    if alert is None or not alert.is_active:
+        return alert
+
+    conn = await db.connect()
+    now = int(time.time())
+    if alert.repeat:
+        flipped = DOWN if alert.direction == UP else UP
+        await conn.execute(
+            "UPDATE alerts SET direction = ?, triggered_at = ?, hit_price = ? "
+            "WHERE id = ?",
+            (flipped, now, price, alert_id),
+        )
+        alert.direction = flipped
+    else:
+        await conn.execute(
+            "UPDATE alerts SET status = ?, triggered_at = ?, hit_price = ? "
+            "WHERE id = ?",
+            (ALERT_DONE, now, price, alert_id),
+        )
+        alert.status = ALERT_DONE
+    await conn.commit()
+    alert.triggered_at = now
+    alert.hit_price = price
+    return alert
+
+
+async def cancel_alert(alert_id: int, owner_id: int | None = None) -> bool:
+    """Снимает уведомление. Чужое снять нельзя."""
+    conn = await db.connect()
+    sql = "UPDATE alerts SET status = ? WHERE id = ? AND status = ?"
+    params: list[Any] = [ALERT_CANCELLED, alert_id, ALERT_ACTIVE]
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params.append(owner_id)
+    cursor = await conn.execute(sql, params)
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def cancel_all_alerts(owner_id: int) -> int:
+    conn = await db.connect()
+    cursor = await conn.execute(
+        "UPDATE alerts SET status = ? WHERE owner_id = ? AND status = ?",
+        (ALERT_CANCELLED, owner_id, ALERT_ACTIVE),
+    )
+    await conn.commit()
+    return cursor.rowcount
+
+
+async def count_alerts(owner_id: int, status: str = ALERT_ACTIVE) -> int:
+    conn = await db.connect()
+    async with conn.execute(
+        "SELECT COUNT(*) AS n FROM alerts WHERE owner_id = ? AND status = ?",
+        (owner_id, status),
+    ) as cur:
+        row = await cur.fetchone()
+    return row["n"] if row else 0

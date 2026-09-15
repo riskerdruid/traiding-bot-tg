@@ -25,6 +25,17 @@ OutcomeCallback = Callable[[repo.Signal], Awaitable[None]]
 CHECK_INTERVAL = 30
 
 
+def _cfg_for(signal: repo.Signal):
+    """Настройки владельца сигнала.
+
+    Срок жизни и рабочий таймфрейм теперь у каждого свои, поэтому закрывать
+    чужой сигнал по своим правилам нельзя.
+    """
+    if getattr(signal, "owner_id", None):
+        return config.view(signal.owner_id)
+    return config
+
+
 class Tracker:
     def __init__(self, on_outcome: OutcomeCallback | None = None) -> None:
         self.on_outcome = on_outcome
@@ -68,14 +79,18 @@ class Tracker:
             return []
 
         closed: list[repo.Signal] = []
-        by_symbol: dict[str, list[repo.Signal]] = {}
-        for signal in active:
-            by_symbol.setdefault(signal.symbol, []).append(signal)
 
-        for symbol, signals in by_symbol.items():
+        # Группируем по паре «инструмент + таймфрейм»: у разных получателей
+        # он может отличаться, а свечи качать дважды незачем
+        by_key: dict[tuple[str, str], list[repo.Signal]] = {}
+        for signal in active:
+            tf = _cfg_for(signal).get("timeframe")
+            by_key.setdefault((signal.symbol, tf), []).append(signal)
+
+        for (symbol, timeframe), signals in by_key.items():
             try:
                 candles = await feed.fetch_candles(
-                    symbol, config.get("timeframe"), limit=320, use_cache=False
+                    symbol, timeframe, limit=320, use_cache=False
                 )
             except Exception as exc:
                 self.last_error = str(exc)
@@ -112,7 +127,7 @@ class Tracker:
 
         # Истечение срока жизни (только биржевые: у опционов свой срок)
         age_min = (time.time() - signal.created_at) / 60
-        if age_min >= config.get("signal_ttl_min"):
+        if age_min >= _cfg_for(signal).get("signal_ttl_min"):
             price = await feed.fetch_price(signal.symbol)
             if price is not None:
                 closed = await repo.close_signal(signal.id, repo.EXPIRED, price)

@@ -43,7 +43,10 @@ CREATE TABLE IF NOT EXISTS signals (
     broker        TEXT    NOT NULL DEFAULT 'ex',  -- ex | po
     kind          TEXT    NOT NULL DEFAULT 'exchange',  -- exchange | binary
     expiry_at     INTEGER,                    -- когда истекает опцион, unix
-    payout        REAL                        -- выплата брокера в % на момент сигнала
+    payout        REAL,                       -- выплата брокера в % на момент сигнала
+
+    -- Кому принадлежит сигнал. NULL — заведён до разделения по получателям.
+    owner_id      INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_status  ON signals(status);
@@ -78,6 +81,27 @@ CREATE TABLE IF NOT EXISTS news_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_at ON news_cache(event_at);
+
+-- Уведомления по цене: человек сам называет уровень, бот сообщает,
+-- когда рынок до него дошёл. К сигналам отношения не имеет — это
+-- просто будильник.
+CREATE TABLE IF NOT EXISTS alerts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id     INTEGER NOT NULL,
+    symbol       TEXT    NOT NULL,
+    price        REAL    NOT NULL,       -- уровень, о котором просили сообщить
+    direction    TEXT    NOT NULL,       -- up | down: с какой стороны подходим
+    start_price  REAL,                   -- цена в момент заказа, для сравнения
+    note         TEXT    NOT NULL DEFAULT '',
+    repeat       INTEGER NOT NULL DEFAULT 0,  -- 1 — не гасить после срабатывания
+    status       TEXT    NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE|DONE|CANCELLED
+    created_at   INTEGER NOT NULL,
+    triggered_at INTEGER,
+    hit_price    REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_owner  ON alerts(owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol, status);
 """
 
 # Дополнения к уже существующим базам. Выполняются по одному,
@@ -89,6 +113,9 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE signals ADD COLUMN kind TEXT NOT NULL DEFAULT 'exchange'",
     "ALTER TABLE signals ADD COLUMN expiry_at INTEGER",
     "ALTER TABLE signals ADD COLUMN payout REAL",
+    # У каждого получателя свой журнал: настройки, а значит и сигналы, разные
+    "ALTER TABLE signals ADD COLUMN owner_id INTEGER",
+    "CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_id)",
 ]
 
 

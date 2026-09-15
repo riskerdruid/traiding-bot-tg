@@ -28,6 +28,30 @@ log = logging.getLogger("storage.settings")
 
 PREFIX = "cfg."
 
+# Настройки хранятся отдельно для каждого получателя: ключ выглядит
+# как `u123456.cfg.deposit`. Общий префикс остался для переноса старых
+# значений, записанных до разделения.
+
+
+def _key(name: str, user_id: int | None) -> str:
+    """Имя настройки в базе для конкретного пользователя."""
+    if user_id is None:
+        return PREFIX + name
+    return f"u{user_id}.{PREFIX}{name}"
+
+
+def _user_from_key(key: str) -> int | None:
+    """Обратная операция: из `u123.cfg.deposit` достаём 123."""
+    if not key.startswith("u"):
+        return None
+    head, _, rest = key.partition(".")
+    if not rest.startswith(PREFIX):
+        return None
+    try:
+        return int(head[1:])
+    except ValueError:
+        return None
+
 
 @dataclass(slots=True)
 class Field:
@@ -42,6 +66,7 @@ class Field:
     step: float = 1
     choices: list[str] = field(default_factory=list)
     advanced: bool = False
+    tip: str = ""  # конкретный совет: что поставить и что из этого выйдет
 
     def default(self) -> Any:
         return getattr(settings, self.key, None)
@@ -254,6 +279,216 @@ FIELDS: list[Field] = [
                "в журнал — увидите их утром. Пусто — присылать всегда."),
 ]
 
+
+@dataclass(frozen=True, slots=True)
+class Preset:
+    """Готовый набор настроек под одну понятную цель.
+
+    Человеку без опыта невозможно осмысленно выставить два десятка
+    параметров: он не знает, что от чего зависит. Поэтому главный способ
+    настройки — выбрать режим одним нажатием, а отдельные значения
+    поправить потом, если захочется.
+    """
+
+    key: str
+    emoji: str
+    name: str
+    summary: str          # что получится — одной строкой
+    detail: str           # кому подходит и почему
+    expect: str           # сколько примерно сигналов ждать
+    values: dict[str, Any]
+
+
+PRESETS: list[Preset] = [
+    Preset(
+        key="careful",
+        emoji="🛡",
+        name="Осторожный",
+        summary="Редкие сигналы, зато самые надёжные",
+        detail=(
+            "Бот ждёт, пока совпадёт всё сразу: и сильное движение, "
+            "и согласие старшего графика, и всплеск торгов. Большинство "
+            "моментов он пропустит — и это намеренно."
+        ),
+        expect="примерно 1–3 сигнала в неделю",
+        values={
+            "min_confidence": 75,
+            "adx_min": 25,
+            "require_htf_agree": True,
+            "require_volume": True,
+            "cooldown_min": 120,
+            "max_signals_per_day": 3,
+            "timeframe": "15m",
+            "htf_timeframe": "4h",
+            "risk_per_trade": 1.0,
+            "risk_reward": 2.0,
+            "atr_sl_mult": 1.8,
+            "news_filter_enabled": True,
+        },
+    ),
+    Preset(
+        key="balanced",
+        emoji="⚖️",
+        name="Обычный",
+        summary="Разумная середина — с него стоит начинать",
+        detail=(
+            "Настройки по умолчанию: движение должно быть заметным, "
+            "старший график — не против. Столько сигналов, чтобы было "
+            "что разбирать, но не столько, чтобы утонуть."
+        ),
+        expect="примерно 1–3 сигнала в день",
+        values={
+            "min_confidence": 60,
+            "adx_min": 20,
+            "require_htf_agree": True,
+            "require_volume": False,
+            "cooldown_min": 45,
+            "max_signals_per_day": 10,
+            "timeframe": "15m",
+            "htf_timeframe": "1h",
+            "risk_per_trade": 1.0,
+            "risk_reward": 1.8,
+            "atr_sl_mult": 1.5,
+            "news_filter_enabled": True,
+        },
+    ),
+    Preset(
+        key="active",
+        emoji="⚡",
+        name="Частые сигналы",
+        summary="Много сообщений — чтобы посмотреть, как всё работает",
+        detail=(
+            "Планка опущена почти до пола: бот пишет по любому намёку "
+            "на движение. Хорош, чтобы за вечер увидеть бота в деле, "
+            "но торговать по нему настоящими деньгами не стоит — "
+            "среди частых сигналов много случайных."
+        ),
+        expect="примерно 10–20 сигналов в день",
+        values={
+            "min_confidence": 40,
+            "adx_min": 10,
+            "require_htf_agree": False,
+            "require_volume": False,
+            "cooldown_min": 10,
+            "max_signals_per_day": 0,
+            "timeframe": "5m",
+            "htf_timeframe": "1h",
+            "risk_per_trade": 0.5,
+            "risk_reward": 1.5,
+            "atr_sl_mult": 1.2,
+            "news_filter_enabled": False,
+        },
+    ),
+]
+
+PRESETS_BY_KEY = {p.key: p for p in PRESETS}
+DEFAULT_PRESET = "balanced"
+
+
+
+# Короткий совет к настройке: что поставить и что из этого выйдет.
+# Держим отдельно от FIELDS, чтобы описание параметра не разрасталось,
+# а совет можно было переписать, не трогая тип и границы. Показывается
+# во всплывающей подсказке рядом с названием.
+TIPS: dict[str, str] = {
+    "symbols": "Начните с одного-двух. Золото (XAU) двигается заметно "
+               "и понятно; валютные пары с пометкой OTC работают даже "
+               "в выходные.",
+    "timeframe": "15 минут — хорошее начало: сигналов достаточно, а шума "
+                 "уже немного. 5 минут дадут сигналов втрое больше, но "
+                 "случайных среди них тоже втрое больше.",
+    "htf_timeframe": "Берите примерно в 4 раза длиннее рабочего: к 15 минутам "
+                     "подходит час, к 5 минутам — полчаса.",
+    "scan_interval": "60 секунд подходит всем. Чаще не нужно: решение "
+                     "принимается по закрытой свече, а она не меняется.",
+    "min_confidence": "Это главный переключатель «много / мало». 40 — сигналы "
+                      "польются потоком, 60 — несколько в день, 80 — пара "
+                      "в неделю. Начните с 60.",
+    "adx_min": "20 — стандарт. Поставьте 10, если сигналов совсем мало, "
+               "и 25, если бот ловит движения, которые тут же затухают.",
+    "cooldown_min": "45 минут хватает, чтобы не получить пять сообщений "
+                    "об одном и том же движении. Поставьте 10, если хотите "
+                    "видеть каждую попытку.",
+    "max_signals_per_day": "10 — разумный потолок. 0 снимает ограничение "
+                           "совсем: в дёрганый день может прийти и полсотни.",
+    "trade_hours": "Оставьте пустым, если торгуете когда придётся. "
+                   "09:00-18:00 — если садитесь за график только днём.",
+    "require_htf_agree": "Держите включённым. Выключите, только если сигналов "
+                         "почти нет: их станет заметно больше, но каждый "
+                         "будет слабее.",
+    "require_volume": "Выключено по умолчанию. Включайте, если ложных "
+                      "сигналов много: бот станет ждать подтверждения "
+                      "деньгами и писать реже.",
+    "signal_ttl_min": "Обычно хватает 6–8 длительностей рабочей свечи: "
+                      "для 15-минутных свечей это около 120 минут.",
+    "deposit": "Впишите настоящую сумму — от неё считается размер сделки "
+               "в карточке. Цифра хранится только у вас и никуда не уходит.",
+    "risk_per_trade": "1% — то, с чего начинают все. При 1000 USDT это "
+                      "10 USDT на сделку: десять неудач подряд заберут "
+                      "около 10% счёта. При 10% те же десять заберут почти всё.",
+    "atr_sl_mult": "1.5 — золотая середина. Меньше — страховка близко "
+                   "и её чаще задевает случайное колебание; больше — "
+                   "реже выбивает, но убыток крупнее.",
+    "risk_reward": "1.8 значит: рискуете 10 USDT, целитесь в 18. Ниже 1.2 "
+                   "ставить не стоит — тогда даже частые удачи не окупают "
+                   "редкие потери.",
+    "po_ssid": "Берётся из браузера за две минуты — в «Помощи» есть "
+               "пошаговая инструкция с картинками. Пароль от счёта "
+               "вводить нигде не нужно.",
+    "po_expiry_min": "Поставьте ровно столько, сколько выставляете у брокера. "
+                     "Обычно 5 минут. Если цифры не совпадут, статистика "
+                     "будет считать не то.",
+    "po_min_payout": "80% — граница выгодности. При выплате 92% достаточно "
+                     "угадывать 52% сделок, при 70% — уже 59%, а это "
+                     "заметно труднее.",
+    "po_otc_only": "Включите, если торгуете по выходным: обычные валютные "
+                   "пары в субботу и воскресенье стоят на месте.",
+    "news_filter_enabled": "Держите включённым. На выходе важной статистики "
+                           "цена прыгает на новости, а не по графику — "
+                           "любые индикаторы там бесполезны.",
+    "news_mute_before_min": "15 минут достаточно: рынок начинает нервничать "
+                            "примерно за четверть часа.",
+    "news_mute_after_min": "30 минут — цена обычно успокаивается за полчаса.",
+    "news_impact": "High хватает большинству. Добавляйте Medium, только если "
+                   "видите, что бот всё равно попадает в новостные скачки.",
+    "news_currencies": "USD влияет и на золото, и на большинство пар. "
+                       "Добавляйте EUR, если торгуете европейскими парами.",
+    "notify_signals": "Выключать имеет смысл, только если хотите смотреть "
+                      "сигналы в приложении, а не получать сообщения.",
+    "notify_outcomes": "Держите включённым: без результатов не видно, "
+                       "работает стратегия или нет.",
+    "daily_report": "Одно сообщение вечером вместо перелистывания журнала.",
+    "daily_report_at": "Ставьте время, когда рынок для вас закрылся — "
+                       "например 21:00.",
+    "ema_fast": "9 — обычное значение. Уменьшите до 5, если хотите ловить "
+                "развороты раньше, ценой ложных срабатываний.",
+    "ema_slow": "21 — обычное значение. Разница с быстрой должна быть "
+                "хотя бы вдвое, иначе линии будут пересекаться постоянно.",
+    "ema_trend": "50 — обычное значение. Это просто фон: помогает не "
+                 "покупать против затяжного падения.",
+    "ema_trend_slow": "200 — не меняйте без причины. На эту линию смотрит "
+                      "большинство участников рынка, потому она и работает.",
+    "adx_period": "14 — классика. Менять стоит только при осознанном "
+                  "эксперименте.",
+    "rsi_period": "14 — классика. Менять стоит только при осознанном "
+                  "эксперименте.",
+    "rsi_long_min": "40 — разумный низ. Ниже него рост выглядит уже не "
+                    "ростом, а отскоком в падении.",
+    "rsi_long_max": "70 — разумный верх. Выше входить поздно: движение "
+                    "перегрето.",
+    "rsi_short_min": "30 — ниже падение уже перегрето, разворот ближе, "
+                     "чем продолжение.",
+    "rsi_short_max": "60 — выше продавать рано: движение ещё смотрит вверх.",
+    "atr_period": "14 — классика. От этого числа зависит, насколько далеко "
+                  "встаёт страховка.",
+    "quiet_hours": "23:00-07:00 — чтобы телефон не будил ночью. Сигналы "
+                   "за это время не пропадут: они останутся в журнале.",
+}
+
+for _f in FIELDS:
+    _f.tip = TIPS.get(_f.key, "")
+
+
 FIELDS_BY_KEY = {f.key: f for f in FIELDS}
 
 # Значения по умолчанию для параметров, которых нет в .env
@@ -275,7 +510,9 @@ class RuntimeConfig:
     """Снимок настроек в памяти + запись в базу."""
 
     def __init__(self) -> None:
-        self._values: dict[str, Any] = {}
+        # Значения по пользователям: {user_id: {параметр: значение}}.
+        # Ключ None — значения по умолчанию из .env, общие для всех.
+        self._by_user: dict[int | None, dict[str, Any]] = {}
         self._loaded = False
 
     # ----------------------------------------------------------------
@@ -289,37 +526,83 @@ class RuntimeConfig:
         return value
 
     async def load(self) -> dict[str, Any]:
-        """Перечитывает настройки из базы. Дёшево — один SELECT."""
+        """Перечитывает настройки всех пользователей. Дёшево — один SELECT."""
         stored = await repo.all_settings()
+
+        # Разбираем плоский список ключей на пользователей
+        raw_by_user: dict[int | None, dict[str, str]] = {}
+        for key, value in stored.items():
+            uid = _user_from_key(key)
+            if uid is not None:
+                name = key.split(".", 1)[1][len(PREFIX):]
+                raw_by_user.setdefault(uid, {})[name] = value
+            elif key.startswith(PREFIX):
+                raw_by_user.setdefault(None, {})[key[len(PREFIX):]] = value
+
+        by_user: dict[int | None, dict[str, Any]] = {}
+        for uid, raw in raw_by_user.items():
+            # В личном слое держим ТОЛЬКО то, что человек менял сам.
+            # Если дополнить его значениями по умолчанию, общий слой
+            # перестанет действовать: человек поправил одну настройку —
+            # и молча потерял все остальные, выставленные для всех.
+            by_user[uid] = self._decode_all(raw, fill_defaults=uid is None)
+
+        # Значения по умолчанию всегда есть, даже если в базе пусто
+        by_user.setdefault(None, self._decode_all({}))
+
+        self._by_user = by_user
+        self._loaded = True
+        return by_user[None]
+
+    def _decode_all(
+        self, raw: dict[str, str], fill_defaults: bool = True
+    ) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for f in FIELDS:
-            raw = stored.get(PREFIX + f.key)
-            if raw is None:
-                values[f.key] = self._fallback(f.key)
-            else:
-                try:
-                    values[f.key] = self._decode(f, raw)
-                except Exception:
-                    log.warning("Значение %s повреждено, беру по умолчанию", f.key)
+            text = raw.get(f.key)
+            if text is None:
+                if fill_defaults:
                     values[f.key] = self._fallback(f.key)
-        self._values = values
-        self._loaded = True
+                continue
+            try:
+                values[f.key] = self._decode(f, text)
+            except Exception:
+                log.warning("Значение %s повреждено, беру по умолчанию", f.key)
+                values[f.key] = self._fallback(f.key)
         return values
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def view(self, user_id: int) -> "UserConfig":
+        """Настройки конкретного получателя."""
+        return UserConfig(self, user_id)
+
+    def known_users(self) -> list[int]:
+        """Кто уже что-то настраивал."""
+        return sorted(u for u in self._by_user if u is not None)
+
+    def get(self, key: str, default: Any = None, user_id: int | None = None) -> Any:
         """Синхронное чтение — стратегия работает без await.
 
-        Ключ, не описанный в FIELDS, тоже читается: берём значение из .env.
-        Так редко меняемые параметры не обязаны попадать в интерфейс,
-        но и не превращаются в None при обращении.
+        Порядок поиска: значение пользователя, затем общее по умолчанию,
+        затем значение из .env. Ключ, не описанный в FIELDS, тоже читается —
+        так редкие параметры не обязаны попадать в интерфейс.
         """
-        if key in self._values:
-            return self._values[key]
+        if user_id is not None:
+            personal = self._by_user.get(user_id)
+            if personal is not None and key in personal:
+                return personal[key]
+
+        shared = self._by_user.get(None)
+        if shared is not None and key in shared:
+            return shared[key]
+
         fallback = self._fallback(key)
         return default if fallback is None and default is not None else fallback
 
-    def all(self) -> dict[str, Any]:
-        return dict(self._values)
+    def all(self, user_id: int | None = None) -> dict[str, Any]:
+        merged = dict(self._by_user.get(None, {}))
+        if user_id is not None:
+            merged.update(self._by_user.get(user_id, {}))
+        return merged
 
     # ----------------------------------------------------------------
 
@@ -381,52 +664,62 @@ class RuntimeConfig:
 
         return str(value)
 
-    async def set(self, key: str, value: Any) -> Any:
+    async def set(self, key: str, value: Any, user_id: int | None = None) -> Any:
         """Проверяет, сохраняет и сразу применяет одно значение."""
         f = FIELDS_BY_KEY.get(key)
         if f is None:
             raise ValidationError(f"Неизвестный параметр: {key}")
         clean = self.validate(f, value)
-        self._cross_check(key, clean)
-        await repo.set_setting(PREFIX + key, self._encode(f, clean))
-        self._values[key] = clean
-        log.info("Настройка изменена: %s = %s", key, clean)
+        self._cross_check(key, clean, user_id=user_id)
+        await repo.set_setting(_key(key, user_id), self._encode(f, clean))
+        self._by_user.setdefault(user_id, {})[key] = clean
+        log.info(
+            "Настройка изменена: %s = %s%s",
+            key, clean, f" (получатель {user_id})" if user_id else "",
+        )
         return clean
 
-    async def set_many(self, updates: dict[str, Any]) -> dict[str, Any]:
+    async def set_many(
+        self, updates: dict[str, Any], user_id: int | None = None
+    ) -> dict[str, Any]:
         applied = {}
         for key, value in updates.items():
-            applied[key] = await self.set(key, value)
+            applied[key] = await self.set(key, value, user_id=user_id)
         return applied
 
-    async def reset(self, key: str) -> Any:
+    async def reset(self, key: str, user_id: int | None = None) -> Any:
         """Возвращает параметр к значению по умолчанию."""
         if key not in FIELDS_BY_KEY:
             raise ValidationError(f"Неизвестный параметр: {key}")
-        await repo.set_setting(PREFIX + key, "")
-        conn_value = self._fallback(key)
-        self._values[key] = conn_value
-        # Пустая строка читается как «нет значения» — убираем запись совсем
-        await repo.delete_setting(PREFIX + key)
-        return conn_value
+        await repo.delete_setting(_key(key, user_id))
+        value = self._fallback(key)
+        personal = self._by_user.get(user_id)
+        if personal is not None:
+            personal.pop(key, None)
+        if user_id is None:
+            self._by_user.setdefault(None, {})[key] = value
+        return self.get(key, user_id=user_id)
 
-    def _cross_check(self, key: str, value: Any) -> None:
+    def _cross_check(self, key: str, value: Any, user_id: int | None = None) -> None:
         """Проверки, затрагивающие несколько параметров сразу."""
+        def cur(name: str) -> Any:
+            return self.get(name, user_id=user_id)
+
         if key in ("timeframe", "htf_timeframe"):
-            tf = value if key == "timeframe" else self.get("timeframe")
-            htf = value if key == "htf_timeframe" else self.get("htf_timeframe")
+            tf = value if key == "timeframe" else cur("timeframe")
+            htf = value if key == "htf_timeframe" else cur("htf_timeframe")
             if _tf_minutes(htf) < _tf_minutes(tf):
                 raise ValidationError(
                     "Таймфрейм тренда должен быть старше рабочего: "
                     f"{htf} мельче, чем {tf}"
                 )
-        if key == "rsi_long_min" and value >= self.get("rsi_long_max", 100):
+        if key == "rsi_long_min" and value >= cur("rsi_long_max"):
             raise ValidationError("Нижняя граница RSI должна быть меньше верхней")
-        if key == "rsi_long_max" and value <= self.get("rsi_long_min", 0):
+        if key == "rsi_long_max" and value <= cur("rsi_long_min"):
             raise ValidationError("Верхняя граница RSI должна быть больше нижней")
-        if key == "ema_fast" and value >= self.get("ema_slow", 999):
+        if key == "ema_fast" and value >= cur("ema_slow"):
             raise ValidationError("Быстрая EMA должна быть короче медленной")
-        if key == "ema_slow" and value <= self.get("ema_fast", 0):
+        if key == "ema_slow" and value <= cur("ema_fast"):
             raise ValidationError("Медленная EMA должна быть длиннее быстрой")
         if key == "symbols" and not value:
             raise ValidationError("Нужен хотя бы один инструмент")
@@ -443,7 +736,7 @@ class RuntimeConfig:
 
     # ----------------------------------------------------------------
 
-    def schema(self) -> list[dict]:
+    def schema(self, user_id: int | None = None) -> list[dict]:
         """Описание всех параметров для построения интерфейса.
 
         Секреты наружу не отдаются: вместо значения уходит только признак
@@ -453,7 +746,7 @@ class RuntimeConfig:
         out = []
         for f in FIELDS:
             item = {**f.to_dict(), "group_label": GROUPS[f.group]}
-            value = self._values.get(f.key)
+            value = self.get(f.key, user_id=user_id)
             if f.kind == "secret":
                 text = str(value or "")
                 item["value"] = ""
@@ -467,14 +760,138 @@ class RuntimeConfig:
             out.append(item)
         return out
 
-    def masked(self, key: str) -> str:
+    # ----------------------------------------------------------------
+    # Готовые режимы и человеческое описание
+    # ----------------------------------------------------------------
+
+    async def apply_preset(self, key: str, user_id: int | None = None) -> "Preset":
+        """Применяет готовый режим целиком.
+
+        Порядок важен: рабочий таймфрейм выставляется раньше старшего,
+        иначе взаимная проверка отклонит промежуточное состояние, когда
+        старший график на минуту оказывается мельче рабочего.
+        """
+        preset = PRESETS_BY_KEY.get(key)
+        if preset is None:
+            raise ValidationError(f"Неизвестный режим: {key}")
+
+        order = {"timeframe": 0, "htf_timeframe": 1}
+        items = sorted(preset.values.items(), key=lambda kv: order.get(kv[0], 2))
+        for name, value in items:
+            await self.set(name, value, user_id=user_id)
+
+        log.info("Выбран режим «%s» (получатель %s)", preset.name, user_id)
+        return preset
+
+    def current_preset(self, user_id: int | None = None) -> str | None:
+        """Какой режим сейчас стоит — или None, если настройки правили вручную.
+
+        Сверяем не запомненное имя, а сами значения: человек мог выбрать
+        режим, а потом что-то подкрутить. Тогда честнее показать «своя
+        настройка», чем врать, что режим по-прежнему тот.
+        """
+        for preset in PRESETS:
+            if all(
+                self.get(name, user_id=user_id) == value
+                for name, value in preset.values.items()
+            ):
+                return preset.key
+        return None
+
+    def is_configured(self, user_id: int) -> bool:
+        """Заходил ли человек в настройки хоть раз.
+
+        По этому признаку приложение решает, показывать ли новичку
+        пошаговый вопросник вместо простыни параметров.
+        """
+        personal = self._by_user.get(user_id)
+        return bool(personal)
+
+    def explain(self, user_id: int | None = None) -> list[str]:
+        """Что бот делает прямо сейчас — обычными словами.
+
+        Настройки, разложенные по группам, не отвечают на главный вопрос
+        новичка: «а что в итоге происходит?». Поэтому собираем из значений
+        несколько фраз, которые читаются как описание поведения.
+        """
+        def g(name: str, default: Any = None) -> Any:
+            return self.get(name, default, user_id=user_id)
+
+        lines: list[str] = []
+
+        symbols = list(g("symbols") or [])
+        if symbols:
+            names = ", ".join(_symbol_words(s) for s in symbols[:4])
+            more = f" и ещё {len(symbols) - 4}" if len(symbols) > 4 else ""
+            lines.append(f"Инструменты, за которыми слежу: {names}{more}.")
+        else:
+            lines.append("Пока не выбрано ни одного инструмента — следить не за чем.")
+
+        lines.append(
+            f"Решение принимаю раз в {_tf_words(str(g('timeframe')))}, "
+            "а общее направление рынка смотрю по "
+            f"{_tf_words(str(g('htf_timeframe')), dative=True)}."
+        )
+
+        conf = int(g("min_confidence") or 0)
+        if conf >= 75:
+            grade = "очень придирчиво — большинство моментов пропущу"
+        elif conf >= 55:
+            grade = "разумно придирчиво"
+        else:
+            grade = "почти без отбора — сообщений будет много"
+        lines.append(f"Пишу, когда совпало не меньше {conf}% признаков: {grade}.")
+
+        limit = int(g("max_signals_per_day") or 0)
+        pause = int(g("cooldown_min") or 0)
+        parts = []
+        if limit:
+            parts.append(f"не больше {limit} сигналов в сутки")
+        if pause:
+            parts.append(f"по одному активу — не чаще раза в {pause} мин")
+        if parts:
+            lines.append("Ограничения: " + ", ".join(parts) + ".")
+
+        hours = str(g("trade_hours") or "").strip()
+        lines.append(
+            f"Ищу входы с {hours.replace('-', ' до ')}."
+            if hours else "Ищу входы круглосуточно."
+        )
+
+        quiet = str(g("quiet_hours") or "").strip()
+        if quiet:
+            lines.append(
+                f"С {quiet.replace('-', ' до ')} не беспокою — "
+                "пропущенное найдёте утром в журнале."
+            )
+
+        if g("news_filter_enabled"):
+            lines.append("Во время важных новостей молчу: там цена летит не по графику.")
+
+        deposit = float(g("deposit") or 0)
+        risk = float(g("risk_per_trade") or 0)
+        if deposit > 0 and risk > 0:
+            money = deposit * risk / 100
+            lines.append(
+                f"Объём считаю от {deposit:,.0f} USDT".replace(",", " ")
+                + f" с риском {risk:g}% — это примерно "
+                + f"{money:,.2f} USDT на сделку.".replace(",", " ")
+            )
+        else:
+            lines.append(
+                "Объём сделки не считаю: не заданы сумма счёта или допустимый риск."
+            )
+
+        return lines
+
+    def masked(self, key: str, user_id: int | None = None) -> str:
         """Безопасное представление секрета для логов и сообщений."""
-        text = str(self.get(key) or "")
+        text = str(self.get(key, user_id=user_id) or "")
         return f"…{text[-6:]}" if text else "не задан"
 
-    def in_quiet_hours(self, now_hm: str) -> bool:
+    def in_quiet_hours(self, now_hm: str, user_id: int | None = None) -> bool:
         """Попадает ли текущее время в интервал «не беспокоить»."""
-        window = str(self.get("quiet_hours") or "").strip()
+        window = str(self.get("quiet_hours", user_id=user_id) or "").strip()
         if not window or "-" not in window:
             return False
         try:
@@ -495,6 +912,94 @@ def _tf_minutes(timeframe: str) -> int:
         return int(timeframe[:-1]) * units[timeframe[-1]]
     except Exception:
         return 0
+
+
+
+# «15m» -> «15 минут»: в описании поведения жаргон неуместен. Форм две,
+# потому что фразы разные: «раз в 15 минут», но «по 15 минутам».
+_TF_ACC = {
+    "1m": "минуту", "3m": "3 минуты", "5m": "5 минут", "15m": "15 минут",
+    "30m": "полчаса", "1h": "час", "2h": "2 часа", "4h": "4 часа",
+    "6h": "6 часов", "12h": "12 часов", "1d": "сутки",
+}
+_TF_DAT = {
+    "1m": "минуте", "3m": "3 минутам", "5m": "5 минутам", "15m": "15 минутам",
+    "30m": "получасу", "1h": "часу", "2h": "2 часам", "4h": "4 часам",
+    "6h": "6 часам", "12h": "12 часам", "1d": "суткам",
+}
+
+
+def _tf_words(timeframe: str, dative: bool = False) -> str:
+    """Длительность свечи словами."""
+    source = _TF_DAT if dative else _TF_ACC
+    return source.get(timeframe, timeframe)
+
+
+def _symbol_words(symbol: str) -> str:
+    """Название инструмента без биржевой записи."""
+    body = symbol.split(":")[0]
+    if body.startswith("po:"):
+        body = body[3:]
+    otc = body.endswith("_otc")
+    if otc:
+        body = body[:-4]
+    if "/" not in body and len(body) == 6:
+        body = f"{body[:3]}/{body[3:]}"
+    pretty = {"XAU": "золото", "XAG": "серебро"}.get(body.split("/")[0])
+    if pretty:
+        body = pretty
+    return body + (" (круглосуточная)" if otc else "")
+
+
+class UserConfig:
+    """Настройки одного пользователя.
+
+    Лёгкий объект-обёртка: держит ссылку на хранилище и свой идентификатор.
+    Передаётся в стратегию и форматирование вместо глобального состояния —
+    так два пользователя не мешают друг другу.
+    """
+
+    __slots__ = ("_store", "user_id")
+
+    def __init__(self, store: "RuntimeConfig", user_id: int) -> None:
+        self._store = store
+        self.user_id = user_id
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._store.get(key, default, user_id=self.user_id)
+
+    def all(self) -> dict[str, Any]:
+        return self._store.all(user_id=self.user_id)
+
+    def schema(self) -> list[dict]:
+        return self._store.schema(user_id=self.user_id)
+
+    async def set(self, key: str, value: Any) -> Any:
+        return await self._store.set(key, value, user_id=self.user_id)
+
+    async def set_many(self, updates: dict[str, Any]) -> dict[str, Any]:
+        return await self._store.set_many(updates, user_id=self.user_id)
+
+    async def reset(self, key: str) -> Any:
+        return await self._store.reset(key, user_id=self.user_id)
+
+    def masked(self, key: str) -> str:
+        return self._store.masked(key, user_id=self.user_id)
+
+    def in_quiet_hours(self, now_hm: str) -> bool:
+        return self._store.in_quiet_hours(now_hm, user_id=self.user_id)
+
+    async def apply_preset(self, key: str) -> "Preset":
+        return await self._store.apply_preset(key, user_id=self.user_id)
+
+    def current_preset(self) -> str | None:
+        return self._store.current_preset(user_id=self.user_id)
+
+    def explain(self) -> list[str]:
+        return self._store.explain(user_id=self.user_id)
+
+    def __repr__(self) -> str:
+        return f"<UserConfig {self.user_id}>"
 
 
 config = RuntimeConfig()

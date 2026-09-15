@@ -50,6 +50,11 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📰 Новости", callback_data="nav:news"),
             ],
             [
+                InlineKeyboardButton(
+                    text="🔔 Уведомления по цене", callback_data="nav:alerts"
+                ),
+            ],
+            [
                 InlineKeyboardButton(text="ℹ️ Статус", callback_data="nav:status"),
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="nav:settings"),
             ],
@@ -104,12 +109,63 @@ def settings_screen(prefs: dict) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🎚 Выбрать режим работы", callback_data="nav:presets"
+            )],
             [toggle("notify_signals", "Новые сигналы")],
             [toggle("notify_outcomes", "Исходы сигналов")],
             [toggle("daily_report", "Сводка за день")],
             [InlineKeyboardButton(text="‹ Меню", callback_data="nav:menu")],
         ]
     )
+
+
+def presets_screen(current: str | None) -> InlineKeyboardMarkup:
+    """Три режима одной кнопкой каждый.
+
+    Выбор цели человеку по силам, а выставление двух десятков чисел — нет.
+    Отметка показывает, какой режим сейчас работает.
+    """
+    from app.storage.settings_store import PRESETS
+
+    rows = []
+    for preset in PRESETS:
+        mark = " ✓" if current == preset.key else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{preset.emoji} {preset.name}{mark}",
+            callback_data=f"preset:{preset.key}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="‹ Настройки", callback_data="nav:settings"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def alerts_screen(alerts: list) -> InlineKeyboardMarkup:
+    """Список заказанных уровней: каждый со своей кнопкой снятия."""
+    from app.bot.formatters import money, short_symbol
+
+    rows = []
+    for alert in alerts[:20]:
+        rows.append([InlineKeyboardButton(
+            text=f"✖️ {short_symbol(alert.symbol)} · {money(alert.price)}",
+            callback_data=f"alert:del:{alert.id}",
+        )])
+    if len(alerts) > 1:
+        rows.append([InlineKeyboardButton(
+            text="🧹 Убрать все", callback_data="alert:clear"
+        )])
+    rows.append([InlineKeyboardButton(text="‹ Меню", callback_data="nav:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def alert_actions(alert_id: int) -> InlineKeyboardMarkup:
+    """Кнопки под самим уведомлением."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🔔 Мои уведомления", callback_data="nav:alerts"
+        ),
+    ]])
 
 
 def signal_actions(signal_id: int) -> InlineKeyboardMarkup:

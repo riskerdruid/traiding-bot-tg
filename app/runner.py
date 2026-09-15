@@ -23,6 +23,7 @@ from app.bot import handlers as bot_handlers
 from app.bot.instance import create_bot, create_dispatcher, setup_bot_profile
 from app.bot.notifier import Notifier
 from app.config import settings
+from app.engine.alerts import AlertWatcher
 from app.engine.scanner import Scanner
 from app.engine.tracker import Tracker
 from app.logging_conf import setup_logging
@@ -54,6 +55,7 @@ class Application:
         self.notifier: Notifier | None = None
         self.scanner: Scanner | None = None
         self.tracker: Tracker | None = None
+        self.alerts: AlertWatcher | None = None
         self.api: uvicorn.Server | None = None
         self.tasks: list[asyncio.Task] = []
         self.started_at = time.time()
@@ -99,11 +101,15 @@ class Application:
 
         self.scanner = Scanner(on_signal=self.notifier.send_signal)
         self.tracker = Tracker(on_outcome=self.notifier.send_outcome)
+        # Уровни, заказанные человеком вручную, живут отдельно от сигналов:
+        # следить приходится и за теми инструментами, которых нет в списке
+        self.alerts = AlertWatcher(on_hit=self.notifier.send_price_alert)
 
         # Пробрасываем живые компоненты в обработчики бота и в API
         shared = {
             "scanner": self.scanner,
             "tracker": self.tracker,
+            "alerts": self.alerts,
             "started_at": self.started_at,
             "notifier": self.notifier,
         }
@@ -202,6 +208,7 @@ class Application:
             asyncio.create_task(self._run_api(), name="api"),
             self.scanner.start(),
             self.tracker.start(),
+            self.alerts.start(),
             asyncio.create_task(self._run_daily_report(), name="daily"),
             asyncio.create_task(self._run_housekeeping(), name="housekeeping"),
         ]
@@ -229,6 +236,8 @@ class Application:
             await self.scanner.stop()
         if self.tracker:
             await self.tracker.stop()
+        if self.alerts:
+            await self.alerts.stop()
 
         if self.dispatcher:
             with contextlib.suppress(Exception):

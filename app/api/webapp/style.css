@@ -959,3 +959,440 @@ main { padding: 0 var(--pad) 20px; }
   -webkit-user-select: none;
   touch-action: manipulation;
 }
+
+/* =========================================================================
+   Подсказки, готовые режимы, пошаговая настройка
+
+   Всё в этом разделе служит одной цели: человек без опыта торговли
+   должен понимать, что он видит, и не бояться нажать.
+   ========================================================================= */
+
+/* ------------------------------------------------ Значок «?» и окошко */
+
+.qmark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin-left: 6px;
+  padding: 0;
+  vertical-align: -3px;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 24%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  opacity: .75;
+  transition: opacity .15s, background .15s, transform .12s;
+}
+.qmark:hover, .qmark:focus-visible {
+  opacity: 1;
+  background: var(--accent);
+  color: var(--accent-fg);
+  outline: none;
+}
+.qmark:active { transform: scale(.9); }
+
+/* Термин прямо в тексте: пунктир намекает, что можно нажать */
+.qterm {
+  border-bottom: 1px dashed color-mix(in srgb, var(--muted) 60%, transparent);
+  cursor: help;
+}
+
+.tipbox {
+  position: fixed;
+  z-index: 200;
+  max-width: 300px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  box-shadow: 0 6px 28px rgba(0, 0, 0, .34);
+  animation: tip-in .13s ease;
+}
+.tipbox p { margin: 0; }
+.tipbox p + p { margin-top: 7px; }
+
+/* Хвостик указывает на значок, от которого окошко открыли */
+.tipbox::after {
+  content: '';
+  position: absolute;
+  left: var(--arrow, 50%);
+  margin-left: -6px;
+  border: 6px solid transparent;
+}
+.tipbox:not(.above)::after {
+  top: -12px;
+  border-bottom-color: var(--card);
+}
+.tipbox.above::after {
+  bottom: -12px;
+  border-top-color: var(--card);
+}
+
+@keyframes tip-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Пояснение под настройкой не должно превращаться в простыню:
+   две строки видно сразу, полный текст — в подсказке по «?» */
+.setting-hint {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------ Готовые режимы */
+
+.preset-grid { display: flex; flex-direction: column; gap: 8px; }
+
+.preset {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, transform .1s, opacity .15s;
+}
+.preset:active { transform: scale(.99); }
+.preset.active { border-color: var(--accent); }
+.preset.busy { opacity: .5; pointer-events: none; }
+
+.preset-emoji { font-size: 20px; line-height: 1.2; flex-shrink: 0; }
+.preset-body { min-width: 0; flex: 1; display: block; }
+
+.preset-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.preset-mark {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+.preset-summary {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.preset-expect {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.preset-info {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 20%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: help;
+}
+
+/* --------------------------------------------- Что бот делает сейчас */
+
+.summary-card { margin-top: 12px; }
+.summary-head {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.summary-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.summary-list li { margin-top: 3px; }
+.summary-list li::marker { color: var(--accent); }
+
+/* --------------------------------------- Основное / все настройки */
+
+.mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 16px 0 10px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+.mode-btn {
+  flex: 1;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mode-btn.active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.mode-switch .qmark { margin-right: 6px; }
+
+/* ------------------------------------------------------------ Кнопки */
+
+.btn-primary {
+  margin-top: 10px;
+  padding: 10px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary:active { transform: scale(.98); }
+.btn-primary:disabled { opacity: .6; pointer-events: none; }
+
+.btn-ghost {
+  margin-top: 10px;
+  padding: 10px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.start-banner { border-color: var(--accent); }
+
+/* ------------------------------------------------ Пошаговая настройка */
+
+.wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .6);
+  animation: fade .2s ease;
+}
+.wizard {
+  width: 100%;
+  max-width: 440px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 20px;
+  border-radius: 20px;
+  background: var(--card);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .4);
+}
+
+.wz-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.wz-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  transition: width .2s, background .2s;
+}
+.wz-dot.done { background: color-mix(in srgb, var(--accent) 50%, transparent); }
+.wz-dot.active { width: 20px; border-radius: 999px; background: var(--accent); }
+
+.wz-title { font-size: 18px; font-weight: 700; line-height: 1.3; }
+.wz-sub {
+  margin-top: 6px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.wz-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 13px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.wz-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.wz-option-emoji { font-size: 19px; line-height: 1.2; flex-shrink: 0; }
+.wz-option-text {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.wz-field { display: block; margin-bottom: 14px; }
+.wz-field > span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.wz-input {
+  width: 100%;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px; /* меньше 16px — и телефон приближает страницу при вводе */
+}
+.wz-input:focus { outline: none; border-color: var(--accent); }
+
+.wz-calc {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: 13px;
+}
+
+.wz-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* ------------------------------------------------ Уведомления по цене */
+
+.price-card { display: flex; align-items: center; justify-content: space-between; }
+.price-bell {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+.price-bell:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.price-bell:active { transform: scale(.92); }
+
+.alert-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.alert-form .alert-symbol { flex: 1 1 110px; min-width: 0; }
+.alert-form .alert-price {
+  flex: 1 1 120px;
+  min-width: 0;
+  /* Меньше 16px — и телефон приближает страницу на фокусе */
+  font-size: 16px;
+}
+.alert-form .alert-add { flex: 0 0 auto; margin-top: 0; }
+
+.alert-empty {
+  margin-top: 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.alert-list { margin-top: 6px; }
+
+.alert-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.alert-dir {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 11px;
+}
+.alert-dir.up { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+.alert-dir.down { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+
+.alert-body { min-width: 0; flex: 1; display: block; }
+.alert-title { display: block; font-size: 13.5px; }
+.alert-meta {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alert-del {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+.alert-del:hover { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }

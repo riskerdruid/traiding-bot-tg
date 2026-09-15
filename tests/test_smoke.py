@@ -27,6 +27,7 @@ from app.api import server as api_server  # noqa: E402
 from app.bot import formatters as fmt  # noqa: E402
 from app.engine.tracker import Tracker  # noqa: E402
 from app.market.feed import Candle, Candles  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.storage import repo  # noqa: E402
 from app.storage.db import db  # noqa: E402
 from app.strategy.trend_momentum import strategy  # noqa: E402
@@ -372,8 +373,9 @@ async def test_api() -> None:
         r = client.get("/api/signals")
         check("/api/signals отвечает", r.status_code == 200)
         # Точное число зависит от того, какие проверки отработали раньше,
-        # поэтому сверяем с базой, а не с константой
-        expected = await repo.count_signals()
+        # поэтому сверяем с базой, а не с константой. Владелец берётся тот же,
+        # от чьего имени отвечает API: чужие сигналы в выдачу не попадают.
+        expected = await repo.count_signals(owner_id=settings.owner_id_list[0])
         check(
             "сигналы вернулись",
             len(r.json()["items"]) == min(expected, 50),
@@ -471,6 +473,41 @@ async def test_api() -> None:
 
         r = client.post("/api/config", json={})
         check("пустой запрос -> 400", r.status_code == 400)
+
+        # --- Готовые режимы и описание словами ---
+        r = client.get("/api/config")
+        body = r.json()
+        check("в конфиге есть режимы", len(body.get("presets") or []) == 3,
+              str(len(body.get("presets") or [])))
+        check("у режима есть ожидание по числу сигналов",
+              all(p.get("expect") for p in body["presets"]))
+        check("есть описание словами", len(body.get("summary") or []) >= 5)
+        check("видно, настраивался ли человек", "configured" in body)
+        check("у поля есть совет", all("tip" in f for f in body["fields"]))
+
+        r = client.post("/api/config/preset/balanced")
+        check("режим применяется через API", r.status_code == 200, f"={r.status_code}")
+        check("в ответе сказано, чего ждать", bool(r.json().get("expect")))
+        r = client.get("/api/config")
+        check("режим виден в конфиге", r.json().get("preset") == "balanced",
+              str(r.json().get("preset")))
+
+        r = client.post("/api/config/preset/выдуманный")
+        check("неизвестный режим -> 400", r.status_code == 400, f"={r.status_code}")
+
+        # --- Уведомления по цене ---
+        r = client.get("/api/alerts")
+        check("/api/alerts отвечает", r.status_code == 200, f"={r.status_code}")
+        before = len(r.json()["items"])
+
+        r = client.post("/api/alerts", json={"symbol": "TEST/USDT", "price": 100})
+        check("без цены инструмента уведомление не заводится",
+              r.status_code == 400, f"={r.status_code}")
+
+        r = client.post("/api/alerts", json={"text": "просто текст"})
+        check("текст без цены -> 400", r.status_code == 400, f"={r.status_code}")
+        check("и объяснение человеческое", "цен" in r.json()["detail"].lower(),
+              r.json()["detail"])
 
         r = client.get("/api/help")
         check("/api/help отвечает", r.status_code == 200)
@@ -649,6 +686,355 @@ async def test_position_sizing() -> None:
     check("без депозита расчёта нет", position_sizing(signal) is None)
     await config.set("deposit", 1000.0)
     await config.set("risk_per_trade", 1.0)
+
+
+async def test_users_are_isolated() -> None:
+    """Двое получателей не должны видеть и трогать чужое.
+
+    Самая опасная ошибка здесь — не падение, а тихое смешивание: один
+    поменял депозит, а поменялось у обоих. Поэтому проверяем каждый срез
+    отдельно: настройки, журнал, паузу и статистику.
+    """
+    print("Разделение по получателям")
+    from app.storage.settings_store import config as cfg
+
+    alice, bob = 555001, 555002
+    a, b = cfg.view(alice), cfg.view(bob)
+    sym_a, sym_b = "AAA/USDT:USDT", "BBB/USDT:USDT"
+
+    # --- настройки ---
+    await a.set("deposit", 5000)
+    await b.set("deposit", 300)
+    check("депозит у каждого свой",
+          (a.get("deposit"), b.get("deposit")) == (5000.0, 300.0),
+          f"{a.get('deposit')} / {b.get('deposit')}")
+
+    await cfg.load()  # перечитали из базы — как после перезапуска
+    a, b = cfg.view(alice), cfg.view(bob)
+    check("переживает перезапуск",
+          (a.get("deposit"), b.get("deposit")) == (5000.0, 300.0))
+
+    await a.set("symbols", [sym_a])
+    await b.set("symbols", [sym_b, "po:EURUSD_otc"])
+    check("инструменты разные", a.get("symbols") != b.get("symbols"))
+    check("у первого один", len(a.get("symbols")) == 1)
+    check("у второго два", len(b.get("symbols")) == 2)
+
+    await a.set("quiet_hours", "23:00-07:00")
+    check("тихие часы только у того, кто их включил",
+          a.in_quiet_hours("02:00") and not b.in_quiet_hours("02:00"))
+
+    await a.set("min_confidence", 80)
+    await b.set("min_confidence", 30)
+    check("пороги разные",
+          (a.get("min_confidence"), b.get("min_confidence")) == (80, 30))
+
+    # Чего человек не трогал — берётся из общих значений
+    check("нетронутое наследуется от общих",
+          b.get("timeframe") == cfg.get("timeframe"))
+
+    # --- журнал ---
+    sig_a = await repo.create_signal(
+        symbol=sym_a, side="LONG", timeframe="15m",
+        entry=100.0, stop_loss=95.0, take_profit=109.0, confidence=70,
+        reasons=[], indicators={}, owner_id=alice,
+    )
+    sig_b = await repo.create_signal(
+        symbol=sym_b, side="SHORT", timeframe="5m",
+        entry=100.0, stop_loss=105.0, take_profit=91.0, confidence=70,
+        reasons=[], indicators={}, owner_id=bob,
+    )
+    check("сигнал помнит владельца",
+          sig_a.owner_id == alice and sig_b.owner_id == bob)
+
+    a_list = await repo.list_signals(limit=100, owner_id=alice)
+    b_list = await repo.list_signals(limit=100, owner_id=bob)
+    check("чужого сигнала в журнале нет",
+          all(s.id != sig_b.id for s in a_list)
+          and all(s.id != sig_a.id for s in b_list))
+    check("свой сигнал в журнале есть",
+          any(s.id == sig_a.id for s in a_list)
+          and any(s.id == sig_b.id for s in b_list))
+
+    a_active = await repo.get_active_signals(owner_id=alice)
+    check("активные тоже разделены",
+          all(s.owner_id in (alice, None) for s in a_active))
+
+    # --- пауза после сигнала ---
+    check("пауза личная",
+          await repo.last_signal_at(sym_a, owner_id=alice) is not None
+          and await repo.last_signal_at(sym_a, owner_id=bob) is None)
+
+    # --- статистика ---
+    await repo.close_signal(sig_a.id, repo.TP_HIT, 109.0)
+    await repo.close_signal(sig_b.id, repo.SL_HIT, 105.0)
+    st_a = await repo.stats(symbol=sym_a, owner_id=alice)
+    st_b = await repo.stats(symbol=sym_b, owner_id=bob)
+    check("у первого победа", (st_a["wins"], st_a["losses"]) == (1, 0),
+          f"{st_a['wins']}/{st_a['losses']}")
+    check("у второго поражение", (st_b["wins"], st_b["losses"]) == (0, 1),
+          f"{st_b['wins']}/{st_b['losses']}")
+    check("чужой результат в свою статистику не попадает",
+          (await repo.stats(symbol=sym_b, owner_id=alice))["decided"] == 0)
+    by_symbol = await repo.stats_by_symbol(owner_id=alice)
+    check("разбивка по инструментам тоже своя",
+          all(row["symbol"] != sym_b for row in by_symbol),
+          str([row["symbol"] for row in by_symbol]))
+
+    # --- объём позиции считается по депозиту владельца ---
+    sizing_a = fmt.position_sizing(await repo.get_signal(sig_a.id))
+    check("объём считается по депозиту владельца",
+          sizing_a is not None and sizing_a["deposit"].startswith("5 000"),
+          str(sizing_a and sizing_a["deposit"]))
+
+    # --- стратегия смотрит только в переданные настройки ---
+    check("при равных настройках прогрев одинаков",
+          strategy.min_candles(a) == strategy.min_candles(b))
+    await a.set("ema_trend", 120)
+    a, b = cfg.view(alice), cfg.view(bob)
+    check("после правки прогрев вырос только у одного",
+          strategy.min_candles(a) > strategy.min_candles(b),
+          f"{strategy.min_candles(a)} / {strategy.min_candles(b)}")
+
+    # Прибираем за собой, чтобы следующие проверки видели чистое состояние
+    for key in ("deposit", "symbols", "quiet_hours", "min_confidence",
+                "ema_trend"):
+        await cfg.reset(key, user_id=alice)
+        await cfg.reset(key, user_id=bob)
+    check("после сброса вернулись общие значения",
+          cfg.view(alice).get("deposit") == cfg.get("deposit"))
+
+
+async def test_presets_and_explain() -> None:
+    """Готовые режимы и описание настроек обычными словами."""
+    print("Режимы работы")
+    from app.storage.settings_store import (
+        FIELDS,
+        PRESETS,
+        PRESETS_BY_KEY,
+        ValidationError,
+        config,
+    )
+
+    check("режимов ровно три", len(PRESETS) == 3, str(len(PRESETS)))
+    for preset in PRESETS:
+        check(f"«{preset.name}»: сказано, чего ждать",
+              bool(preset.expect) and bool(preset.summary) and bool(preset.detail))
+        check(f"«{preset.name}»: значения существуют",
+              all(k in {f.key for f in FIELDS} for k in preset.values),
+              str([k for k in preset.values if k not in {f.key for f in FIELDS}]))
+
+    # Режимы должны отличаться количеством сигналов, иначе выбор бессмыслен
+    confs = [p.values["min_confidence"] for p in PRESETS]
+    check("режимы различаются придирчивостью", len(set(confs)) == 3, str(confs))
+    check("осторожный придирчивее частого",
+          PRESETS_BY_KEY["careful"].values["min_confidence"]
+          > PRESETS_BY_KEY["active"].values["min_confidence"])
+
+    uid = 888001
+    view = config.view(uid)
+    applied = await view.apply_preset("careful")
+    check("режим применился", applied.key == "careful")
+    check("значения встали",
+          view.get("min_confidence") == 75 and view.get("adx_min") == 25,
+          f"{view.get('min_confidence')} / {view.get('adx_min')}")
+    check("режим опознаётся обратно", view.current_preset() == "careful",
+          str(view.current_preset()))
+
+    # Смена режима не должна спотыкаться о взаимную проверку таймфреймов
+    await view.apply_preset("active")
+    check("переключение на частый прошло", view.current_preset() == "active")
+    check("таймфреймы согласованы",
+          view.get("timeframe") == "5m" and view.get("htf_timeframe") == "1h")
+    await view.apply_preset("careful")
+    check("и обратно", view.current_preset() == "careful")
+
+    await view.set("min_confidence", 63)
+    check("после ручной правки режим больше не заявлен",
+          view.current_preset() is None, str(view.current_preset()))
+
+    try:
+        await view.apply_preset("несуществующий")
+        check("неизвестный режим отклоняется", False)
+    except ValidationError:
+        check("неизвестный режим отклоняется", True)
+
+    # Чужие настройки режим не трогает
+    other = config.view(888002)
+    check("соседа не задело", other.current_preset() != "careful",
+          str(other.current_preset()))
+
+    # --- описание обычными словами ---
+    lines = view.explain()
+    text = " ".join(lines)
+    check("описание не пустое", len(lines) >= 5, str(len(lines)))
+    check("сказано, за чем следим", "за которыми слежу" in text)
+    check("сказано про частоту решений", "Решение принимаю" in text)
+    check("сказано про придирчивость", "признаков" in text)
+    check("сказано про деньги", "USDT" in text)
+    check("без биржевого жаргона",
+          not any(w in text for w in ("таймфрейм", "ТФ", "winrate", "ATR")),
+          text)
+
+    await view.set("quiet_hours", "23:00-07:00")
+    check("тихие часы попали в описание",
+          any("не беспокою" in line for line in view.explain()))
+
+    for key in ("min_confidence", "quiet_hours"):
+        await config.reset(key, user_id=uid)
+
+    # --- подсказки у настроек ---
+    schema = config.schema(user_id=uid)
+    no_tip = [f["key"] for f in schema if not f.get("tip")]
+    check("совет есть у каждой настройки", not no_tip, str(no_tip))
+    short = [f["key"] for f in schema if 0 < len(f.get("tip") or "") < 30]
+    check("советы содержательные", not short, str(short))
+
+
+async def test_price_alerts() -> None:
+    """Будильник по цене: разбор фразы, хранение, срабатывание."""
+    print("Уведомления по цене")
+    from app.bot import alerts_input as ai
+    from app.engine.alerts import AlertWatcher
+
+    # --- понимание человеческой фразы ---
+    known = ["XAU/USDT:USDT", "po:EURUSD_otc", "BTC/USDT:USDT"]
+    cases = [
+        ("биткоин 95000", "BTC/USDT:USDT", 95000.0, ""),
+        ("золото 4 400", "XAU/USDT:USDT", 4400.0, ""),
+        ("BTC 95000 продать половину", "BTC/USDT:USDT", 95000.0, "продать половину"),
+        ("eurusd 1.0850", "po:EURUSD_otc", 1.085, ""),
+        ("уведоми когда биткоин будет 95000", "BTC/USDT:USDT", 95000.0, ""),
+        ("сообщи на 4400 по золоту", "XAU/USDT:USDT", 4400.0, "по золоту"),
+        ("биткоину 95000", "BTC/USDT:USDT", 95000.0, ""),
+    ]
+    for text, want_symbol, want_price, want_note in cases:
+        parsed = ai.parse_request(text)
+        ok = parsed is not None
+        if ok:
+            names, price, note = parsed
+            symbol = ai.resolve_any(names, known)
+            ok = symbol == want_symbol and abs(price - want_price) < 1e-9 \
+                and note == want_note
+        check(f"разбирает «{text}»", ok, str(parsed))
+
+    for text in ("привет", "как дела", "5 минут"):
+        parsed = ai.parse_request(text)
+        resolved = ai.resolve_any(parsed[0], known) if parsed else None
+        check(f"не выдумывает из «{text}»", resolved is None, str(parsed))
+
+    check("тикер из имени брокера", ai.base_of("po:EURUSD_otc") == "EURUSD")
+    check("валютная пара склеивается", ai.base_of("EUR/USD") == "EURUSD")
+    check("крипта — по базе", ai.base_of("BTC/USDT:USDT") == "BTC")
+
+    # --- хранение ---
+    up = await repo.create_alert(
+        owner_id=777001, symbol="BTC/USDT:USDT", price=95000,
+        start_price=90000, note="купить",
+    )
+    down = await repo.create_alert(
+        owner_id=777001, symbol="XAU/USDT:USDT", price=4000, start_price=4300,
+    )
+    other = await repo.create_alert(
+        owner_id=777002, symbol="BTC/USDT:USDT", price=120000, start_price=90000,
+    )
+    check("сторона выбрана сама: вверх", up.direction == repo.UP, up.direction)
+    check("сторона выбрана сама: вниз", down.direction == repo.DOWN, down.direction)
+
+    mine = await repo.list_alerts(owner_id=777001)
+    check("вижу только свои", len(mine) == 2 and all(a.owner_id == 777001 for a in mine))
+    check("чужое не видно", all(a.id != other.id for a in mine))
+
+    # --- когда считать, что дошло ---
+    check("вверх: не дошло", not up.reached(94999))
+    check("вверх: дошло ровно", up.reached(95000))
+    check("вверх: перескочило", up.reached(96000))
+    check("вниз: не дошло", not down.reached(4001))
+    check("вниз: дошло", down.reached(3999))
+
+    # --- срабатывание ---
+    fired = await repo.trigger_alert(up.id, 95120)
+    check("после срабатывания гаснет", fired.status == repo.ALERT_DONE, fired.status)
+    check("цена срабатывания запомнена", fired.hit_price == 95120)
+    check("в активных больше нет",
+          all(a.id != up.id for a in await repo.list_alerts(owner_id=777001)))
+    check("повторно не срабатывает",
+          (await repo.trigger_alert(up.id, 96000)).status == repo.ALERT_DONE)
+
+    # Повторяющееся переворачивается, иначе звонило бы на каждой проверке
+    loop = await repo.create_alert(
+        owner_id=777001, symbol="ETH/USDT:USDT", price=3000,
+        start_price=2800, repeat=True,
+    )
+    again = await repo.trigger_alert(loop.id, 3010)
+    check("повторяющееся остаётся активным", again.status == repo.ALERT_ACTIVE)
+    check("и ждёт возврата с другой стороны", again.direction == repo.DOWN,
+          again.direction)
+
+    # --- снятие ---
+    check("чужое снять нельзя", not await repo.cancel_alert(other.id, owner_id=777001))
+    check("своё снимается", await repo.cancel_alert(down.id, owner_id=777001))
+    left = await repo.cancel_all_alerts(777001)
+    check("снял всё разом", left >= 1 and not await repo.list_alerts(owner_id=777001))
+
+    # --- наблюдатель ---
+    watcher = AlertWatcher()
+    hits: list = []
+
+    async def remember(alert, price):
+        hits.append((alert.id, price))
+
+    watcher.on_hit = remember
+    target = await repo.create_alert(
+        owner_id=777003, symbol="XAU/USDT:USDT", price=4300.0, start_price=4200.0,
+    )
+    waiting = await repo.create_alert(
+        owner_id=777003, symbol="BTC/USDT:USDT", price=200000.0, start_price=90000.0,
+    )
+
+    # Биржу в проверке не дёргаем: нас интересует логика наблюдателя,
+    # а не доступность сети
+    from app.engine import alerts as alerts_engine
+
+    async def fake_prices(symbols):
+        return {"XAU/USDT:USDT": 4350.0, "BTC/USDT:USDT": 90000.0}
+
+    real_fetch = alerts_engine.feed.fetch_prices
+    alerts_engine.feed.fetch_prices = fake_prices
+    try:
+        fired_list = await watcher.check_once()
+    finally:
+        alerts_engine.feed.fetch_prices = real_fetch
+
+    check("наблюдатель заметил дошедший уровень",
+          [a.id for a in fired_list] == [target.id],
+          str([a.id for a in fired_list]))
+    check("и позвал обработчик", hits and hits[0][0] == target.id, str(hits))
+    check("недошедший не тронут",
+          (await repo.get_alert(waiting.id)).status == repo.ALERT_ACTIVE)
+    check("счётчик наблюдения заполнен", watcher.watching >= 2, str(watcher.watching))
+    await repo.cancel_all_alerts(777003)
+
+    # --- оформление ---
+    card = fmt.alert_card(
+        repo.Alert(
+            id=1, owner_id=1, symbol="BTC/USDT:USDT", price=95000.0,
+            direction=repo.UP, start_price=90000.0, note="купить половину",
+            repeat=False, status=repo.ALERT_DONE, created_at=int(time.time()) - 3600,
+        ),
+        95120.0,
+        {"day_change_pct": 2.4, "day_high": 95500, "day_low": 92000,
+         "day_position": 88.0},
+    )
+    check("в карточке есть заказанная цена", "95 000" in card, card[:80])
+    check("в карточке есть текущая", "95 120" in card)
+    check("в карточке есть движение за сутки", "+2.40%" in card, card)
+    check("в карточке есть заметка", "купить половину" in card)
+    check("в карточке сказано, что это не сигнал", "не сигнал" in card)
+    check("в карточке видно, сколько ждали", "ждало" in card)
+
+    empty = fmt.alerts_list_card([])
+    check("пустой список объясняет, как пользоваться", "биткоин 95000" in empty)
 
 
 async def test_brokers_and_binary() -> None:
@@ -865,6 +1251,12 @@ async def main() -> int:
         await test_settings_store()
         print()
         await test_position_sizing()
+        print()
+        await test_presets_and_explain()
+        print()
+        await test_price_alerts()
+        print()
+        await test_users_are_isolated()
         print()
         await test_brokers_and_binary()
         print()

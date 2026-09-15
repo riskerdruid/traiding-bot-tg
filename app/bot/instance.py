@@ -21,12 +21,14 @@ log = logging.getLogger("bot.instance")
 
 COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
+    BotCommand(command="setup", description="Быстрая настройка в один шаг"),
     BotCommand(command="signals", description="Активные сигналы"),
-    BotCommand(command="stats", description="Статистика и winrate"),
+    BotCommand(command="alerts", description="Уведомления по цене"),
+    BotCommand(command="stats", description="Сколько раз угадал"),
     BotCommand(command="history", description="Завершённые сигналы"),
     BotCommand(command="news", description="Экономический календарь"),
     BotCommand(command="status", description="Состояние бота"),
-    BotCommand(command="settings", description="Уведомления"),
+    BotCommand(command="settings", description="Настройки и режим работы"),
     BotCommand(command="test", description="Проверить доставку сигналов"),
     BotCommand(command="help", description="Справка"),
 ]

@@ -169,43 +169,49 @@ class EconomicCalendar:
     # Запросы
     # ----------------------------------------------------------------
 
-    def _relevant(self, event: NewsEvent) -> bool:
-        """Событие влияет на наши инструменты?"""
-        if event.impact not in [i.strip().capitalize() for i in str(config.get("news_impact") or "High").split(",") if i.strip()]:
+    def _relevant(self, event: NewsEvent, cfg=None) -> bool:
+        """Событие влияет на наши инструменты?
+
+        Какие новости учитывать — личная настройка, поэтому источник
+        передаётся аргументом.
+        """
+        cfg = cfg or config
+        if event.impact not in [i.strip().capitalize() for i in str(cfg.get("news_impact") or "High").split(",") if i.strip()]:
             return False
-        currencies = [c.strip().upper() for c in str(config.get("news_currencies") or "USD").split(",") if c.strip()]
+        currencies = [c.strip().upper() for c in str(cfg.get("news_currencies") or "USD").split(",") if c.strip()]
         if not currencies:
             return True
         return event.currency in currencies or event.currency == "ALL"
 
-    def mute_reason(self, now: int | None = None) -> NewsEvent | None:
+    def mute_reason(self, cfg=None, now: int | None = None) -> NewsEvent | None:
         """Возвращает событие, из-за которого сейчас нельзя выдавать сигналы."""
-        if not config.get("news_filter_enabled"):
+        cfg = cfg or config
+        if not cfg.get("news_filter_enabled"):
             return None
 
         now = now or int(time.time())
-        before = config.get("news_mute_before_min")
-        after = config.get("news_mute_after_min")
+        before = cfg.get("news_mute_before_min")
+        after = cfg.get("news_mute_after_min")
 
         for event in self._events:
-            if not self._relevant(event):
+            if not self._relevant(event, cfg):
                 continue
             minutes = event.minutes_from(now)
             if -after <= minutes <= before:
                 return event
         return None
 
-    def upcoming(self, limit: int = 5, only_relevant: bool = True) -> list[NewsEvent]:
+    def upcoming(self, limit: int = 5, only_relevant: bool = True, cfg=None) -> list[NewsEvent]:
         """Ближайшие события — для /news и Mini App."""
         now = int(time.time())
         out = [
             e
             for e in self._events
-            if e.event_at > now and (not only_relevant or self._relevant(e))
+            if e.event_at > now and (not only_relevant or self._relevant(e, cfg))
         ]
         return out[:limit]
 
-    def today(self, only_relevant: bool = True) -> list[NewsEvent]:
+    def today(self, only_relevant: bool = True, cfg=None) -> list[NewsEvent]:
         """События сегодняшнего дня в часовом поясе отчётов."""
         now_local = datetime.now(settings.tz)
         start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -214,7 +220,7 @@ class EconomicCalendar:
             e
             for e in self._events
             if start.timestamp() <= e.event_at < end
-            and (not only_relevant or self._relevant(e))
+            and (not only_relevant or self._relevant(e, cfg))
         ]
 
     @property

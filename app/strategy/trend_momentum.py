@@ -35,7 +35,7 @@ class TrendMomentumStrategy(Strategy):
     name = "trend_momentum"
     description = "Пересечение EMA по тренду старшего ТФ с фильтром ADX и RSI"
 
-    def min_candles(self) -> int:
+    def min_candles(self, cfg=None) -> int:
         """Сколько свечей нужно РАБОЧЕМУ таймфрейму.
 
         Раньше здесь стояла длинная EMA (200), но на рабочем таймфрейме она
@@ -47,12 +47,13 @@ class TrendMomentumStrategy(Strategy):
         Считаем по тем индикаторам, которые действительно вычисляются здесь:
         самый длинный из них и задаёт прогрев.
         """
+        cfg = cfg or config
         needed = max(
-            int(config.get("ema_trend") or 50),
-            int(config.get("ema_slow") or 21),
-            int(config.get("rsi_period") or 14),
-            int(config.get("atr_period") or 14),
-            int(config.get("adx_period") or 14) * 2,  # ADX сглаживается дважды
+            int(cfg.get("ema_trend") or 50),
+            int(cfg.get("ema_slow") or 21),
+            int(cfg.get("rsi_period") or 14),
+            int(cfg.get("atr_period") or 14),
+            int(cfg.get("adx_period") or 14) * 2,  # ADX сглаживается дважды
             26 + 9,                                   # MACD: медленная + сигнальная
         )
         # Запас, чтобы у индикаторов было несколько готовых значений подряд
@@ -63,9 +64,10 @@ class TrendMomentumStrategy(Strategy):
     # ----------------------------------------------------------------
 
     def analyze(
-        self, candles: Candles, htf_candles: Candles | None = None
+        self, candles: Candles, htf_candles: Candles | None = None, cfg=None
     ) -> StrategyResult | None:
-        if len(candles) < self.min_candles():
+        cfg = cfg or config
+        if len(candles) < self.min_candles(cfg):
             return None
 
         closes = candles.closes
@@ -73,12 +75,12 @@ class TrendMomentumStrategy(Strategy):
         lows = candles.lows
         price = closes[-1]
 
-        ema_fast = ind.ema(closes, config.get("ema_fast"))
-        ema_slow = ind.ema(closes, config.get("ema_slow"))
-        ema_trend = ind.ema(closes, config.get("ema_trend"))
-        rsi_line = ind.rsi(closes, config.get("rsi_period"))
-        adx_line, plus_di, minus_di = ind.adx(highs, lows, closes, config.get("adx_period"))
-        atr_line = ind.atr(highs, lows, closes, config.get("atr_period"))
+        ema_fast = ind.ema(closes, cfg.get("ema_fast"))
+        ema_slow = ind.ema(closes, cfg.get("ema_slow"))
+        ema_trend = ind.ema(closes, cfg.get("ema_trend"))
+        rsi_line = ind.rsi(closes, cfg.get("rsi_period"))
+        adx_line, plus_di, minus_di = ind.adx(highs, lows, closes, cfg.get("adx_period"))
+        atr_line = ind.atr(highs, lows, closes, cfg.get("atr_period"))
         _, _, macd_hist = ind.macd(closes)
         stoch_k, _ = ind.stochastic(highs, lows, closes)
 
@@ -94,10 +96,10 @@ class TrendMomentumStrategy(Strategy):
         if None in (rsi_now, adx_now, atr_now, trend_now) or not atr_now:
             return None
 
-        htf_bias = self._htf_bias(htf_candles)
+        htf_bias = self._htf_bias(htf_candles, cfg)
 
         # --- ВОРОТА 1: рынок должен быть трендовым ---
-        if adx_now < config.get("adx_min"):
+        if adx_now < cfg.get("adx_min"):
             return None
 
         # --- ВОРОТА 2: должен сработать триггер входа ---
@@ -111,17 +113,17 @@ class TrendMomentumStrategy(Strategy):
         # --- ВОРОТА 3: направление не должно спорить со старшим ТФ ---
         # Заказчик может отключить это условие, но тогда сигналов станет
         # заметно больше, а доля ложных вырастет — предупреждение в подсказке
-        if config.get("require_htf_agree"):
+        if cfg.get("require_htf_agree"):
             if htf_bias == "BEAR" and side == LONG:
                 return None
             if htf_bias == "BULL" and side == SHORT:
                 return None
 
         # --- ВОРОТА 4: RSI в рабочей зоне (не входим в перегрев) ---
-        if side == LONG and not (config.get("rsi_long_min") <= rsi_now <= config.get("rsi_long_max")):
+        if side == LONG and not (cfg.get("rsi_long_min") <= rsi_now <= cfg.get("rsi_long_max")):
             return None
         if side == SHORT and not (
-            config.get("rsi_short_min") <= rsi_now <= config.get("rsi_short_max")
+            cfg.get("rsi_short_min") <= rsi_now <= cfg.get("rsi_short_max")
         ):
             return None
 
@@ -131,18 +133,18 @@ class TrendMomentumStrategy(Strategy):
 
         arrow = "снизу вверх" if side == LONG else "сверху вниз"
         reasons.append(
-            f"EMA{config.get('ema_fast')} пересекла EMA{config.get('ema_slow')} {arrow}"
+            f"EMA{cfg.get('ema_fast')} пересекла EMA{cfg.get('ema_slow')} {arrow}"
         )
         reasons.append(f"ADX {adx_now:.0f} — тренд подтверждён")
 
         if htf_bias == ("BULL" if side == LONG else "BEAR"):
             confidence += 15
-            reasons.append(f"Старший ТФ {config.get('htf_timeframe')} в том же направлении")
+            reasons.append(f"Старший ТФ {cfg.get('htf_timeframe')} в том же направлении")
 
         if (side == LONG and price > trend_now) or (side == SHORT and price < trend_now):
             confidence += 10
             above = "выше" if side == LONG else "ниже"
-            reasons.append(f"Цена {above} EMA{config.get('ema_trend')}")
+            reasons.append(f"Цена {above} EMA{cfg.get('ema_trend')}")
 
         if pdi_now is not None and mdi_now is not None:
             if (side == LONG and pdi_now > mdi_now) or (
@@ -172,7 +174,7 @@ class TrendMomentumStrategy(Strategy):
                 reasons.append(f"Осторожно: стохастик в зоне перегрева ({stoch_now:.0f})")
 
         volume_spike = self._volume_spike(candles)
-        if config.get("require_volume") and not volume_spike:
+        if cfg.get("require_volume") and not volume_spike:
             # Жёсткое требование: без всплеска объёма вход не рассматриваем
             return None
         if volume_spike:
@@ -187,13 +189,13 @@ class TrendMomentumStrategy(Strategy):
         confidence = max(0, min(100, confidence))
 
         # --- Уровни ---
-        risk = atr_now * config.get("atr_sl_mult")
+        risk = atr_now * cfg.get("atr_sl_mult")
         if side == LONG:
             stop_loss = price - risk
-            take_profit = price + risk * config.get("risk_reward")
+            take_profit = price + risk * cfg.get("risk_reward")
         else:
             stop_loss = price + risk
-            take_profit = price - risk * config.get("risk_reward")
+            take_profit = price - risk * cfg.get("risk_reward")
 
         indicators_snapshot = {
             "rsi": round(rsi_now, 1),
@@ -224,19 +226,20 @@ class TrendMomentumStrategy(Strategy):
     # Вспомогательное
     # ----------------------------------------------------------------
 
-    def _htf_bias(self, htf: Candles | None) -> str:
+    def _htf_bias(self, htf: Candles | None, cfg=None) -> str:
         """Направление старшего таймфрейма: BULL, BEAR или NEUTRAL."""
-        if htf is None or len(htf) < config.get("ema_trend") + 5:
+        cfg = cfg or config
+        if htf is None or len(htf) < cfg.get("ema_trend") + 5:
             return "NEUTRAL"
 
         closes = htf.closes
-        fast = ind.last_valid(ind.ema(closes, config.get("ema_trend")))
+        fast = ind.last_valid(ind.ema(closes, cfg.get("ema_trend")))
         if fast is None:
             return "NEUTRAL"
 
         # Если истории хватает — сверяемся с медленной EMA, иначе с ценой
-        if len(htf) >= config.get("ema_trend_slow") + 5:
-            slow = ind.last_valid(ind.ema(closes, config.get("ema_trend_slow")))
+        if len(htf) >= cfg.get("ema_trend_slow") + 5:
+            slow = ind.last_valid(ind.ema(closes, cfg.get("ema_trend_slow")))
             if slow is not None:
                 return "BULL" if fast > slow else "BEAR"
 

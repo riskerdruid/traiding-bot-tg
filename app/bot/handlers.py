@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 
@@ -10,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
+from app.bot import alerts_input
 from app.bot import formatters as fmt
 from app.bot import keyboards as kb
 from app.config import settings
@@ -73,10 +75,10 @@ async def deny_callback(call: CallbackQuery) -> None:
 # --------------------------------------------------------------------------
 
 
-async def get_prefs() -> dict:
-    """Текущие значения быстрых переключателей."""
+async def get_prefs(uid: int) -> dict:
+    """Текущие значения быстрых переключателей этого получателя."""
     await config.load()
-    return {key: bool(config.get(key)) for key in QUICK_TOGGLES}
+    return {key: bool(config.get(key, user_id=uid)) for key in QUICK_TOGGLES}
 
 
 # --------------------------------------------------------------------------
@@ -84,8 +86,8 @@ async def get_prefs() -> dict:
 # --------------------------------------------------------------------------
 
 
-async def screen_signals() -> tuple[str, object]:
-    active = await repo.get_active_signals()
+async def screen_signals(uid: int) -> tuple[str, object]:
+    active = await repo.get_active_signals(owner_id=uid)
     prices: dict[str, float] = {}
     if active:
         symbols = list({s.symbol for s in active})
@@ -93,33 +95,34 @@ async def screen_signals() -> tuple[str, object]:
     return fmt.active_list(active, prices), kb.signals_screen(bool(active))
 
 
-async def screen_history() -> tuple[str, object]:
-    signals = await repo.list_signals(limit=10)
+async def screen_history(uid: int) -> tuple[str, object]:
+    signals = await repo.list_signals(limit=10, owner_id=uid)
     closed = [s for s in signals if s.status != repo.ACTIVE]
     return fmt.history_list(closed, "Последние завершённые"), kb.back_button()
 
 
-async def screen_stats(period: str = "all") -> tuple[str, object]:
+async def screen_stats(uid: int, period: str = "all") -> tuple[str, object]:
     label, window = PERIODS.get(period, PERIODS["all"])
     since = int(time.time() - window) if window else None
-    data = await repo.stats(since=since)
-    by_symbol = await repo.stats_by_symbol(since=since)
+    data = await repo.stats(since=since, owner_id=uid)
+    by_symbol = await repo.stats_by_symbol(since=since, owner_id=uid)
     return fmt.stats_card(data, label, by_symbol), kb.stats_periods(period)
 
 
-async def screen_news() -> tuple[str, object]:
+async def screen_news(uid: int) -> tuple[str, object]:
+    cfg = config.view(uid)
     await calendar.refresh()
-    events = calendar.upcoming(limit=6)
-    return fmt.news_card(events, calendar.mute_reason()), kb.back_button()
+    events = calendar.upcoming(limit=6, cfg=cfg)
+    return fmt.news_card(events, calendar.mute_reason(cfg)), kb.back_button()
 
 
-async def screen_status() -> tuple[str, object]:
+async def screen_status(uid: int) -> tuple[str, object]:
     scanner = runtime.get("scanner")
     tracker = runtime.get("tracker")
-    scanner_state = scanner.state() if scanner else {"running": False, "scans_done": 0}
+    scanner_state = scanner.state(uid) if scanner else {"running": False, "scans_done": 0}
     tracker_state = tracker.state() if tracker else {}
     health = await feed.health()
-    prices = await feed.fetch_prices(config.get("symbols") or [])
+    prices = await feed.fetch_prices(config.get("symbols", user_id=uid) or [])
     uptime = time.time() - runtime.get("started_at", time.time())
     return (
         fmt.status_card(scanner_state, tracker_state, health, prices, uptime),
@@ -127,9 +130,80 @@ async def screen_status() -> tuple[str, object]:
     )
 
 
-async def screen_settings() -> tuple[str, object]:
-    prefs = await get_prefs()
-    return fmt.settings_card(config.all()), kb.settings_screen(prefs)
+async def screen_settings(uid: int) -> tuple[str, object]:
+    prefs = await get_prefs(uid)
+    return (
+        fmt.settings_card(config.all(user_id=uid), config.explain(user_id=uid)),
+        kb.settings_screen(prefs),
+    )
+
+
+async def screen_alerts(uid: int) -> tuple[str, object]:
+    alerts = await repo.list_alerts(owner_id=uid)
+    prices = {}
+    if alerts:
+        with contextlib.suppress(Exception):
+            prices = await feed.fetch_prices(sorted({a.symbol for a in alerts}))
+    return fmt.alerts_list_card(alerts, prices), kb.alerts_screen(alerts)
+
+
+async def create_alert_from_text(uid: int, text: str) -> str | None:
+    """Пробует понять «биткоин 95000» и завести уведомление.
+
+    Возвращает готовый ответ человеку или None, если в сообщении вообще
+    не было похоже на заказ уровня — тогда отвечает общий обработчик.
+    """
+    parsed = alerts_input.parse_request(text)
+    if parsed is None:
+        return None
+    names, price, note = parsed
+
+    known = list(config.get("symbols", user_id=uid) or [])
+    symbol = alerts_input.resolve_any(names, known)
+    if symbol is None:
+        return (
+            "🤔 Цену я понял, а вот инструмент — нет.\n\n"
+            "Напишите название в начале: <code>биткоин 95000</code>, "
+            "<code>золото 4400</code>, <code>BTC 95000</code>.\n\n"
+            "Работают и обычные названия, и тикеры."
+        )
+
+    current = await feed.fetch_price(symbol)
+    if current is None:
+        return (
+            f"😕 Не удалось узнать текущую цену "
+            f"<b>{fmt.short_symbol(symbol)}</b> — уведомление не поставил.\n\n"
+            "Похоже, инструмент сейчас недоступен. Попробуйте позже "
+            "или выберите другой."
+        )
+
+    alert = await repo.create_alert(
+        owner_id=uid, symbol=symbol, price=price,
+        start_price=current, note=note,
+    )
+
+    direction = "вырастет до" if alert.direction == repo.UP else "опустится до"
+    distance = abs(current - price) / current * 100 if current else 0
+    answer = [
+        f"🔔 <b>Принято.</b> Сообщу, когда "
+        f"{fmt.short_symbol(symbol)} {direction} <b>{fmt.money(price)}</b>.",
+        "",
+        f"Сейчас: <b>{fmt.money(current)}</b> — идти "
+        f"{distance:.2f}% {'вверх' if alert.direction == repo.UP else 'вниз'}.",
+    ]
+    if note:
+        answer.append(f"📝 Заметка: <i>{note}</i>")
+    answer += [
+        "",
+        "<i>Это просто будильник по цене, не совет на сделку. "
+        "Все заказанные уровни — в разделе «Уведомления по цене».</i>",
+    ]
+    return "\n".join(answer)
+
+
+async def screen_presets(uid: int) -> tuple[str, object]:
+    current = config.current_preset(user_id=uid)
+    return fmt.presets_card(current), kb.presets_screen(current)
 
 
 # --------------------------------------------------------------------------
@@ -140,11 +214,12 @@ async def screen_settings() -> tuple[str, object]:
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     name = message.from_user.first_name or "трейдер"
-    active = await repo.count_signals(status=repo.ACTIVE)
-    data = await repo.stats()
+    uid = message.from_user.id
+    active = await repo.count_signals(status=repo.ACTIVE, owner_id=uid)
+    data = await repo.stats(owner_id=uid)
 
     symbols = ", ".join(
-        fmt.short_symbol(s) for s in (config.get("symbols") or [])
+        fmt.short_symbol(s) for s in (config.get("symbols", user_id=uid) or [])
     )
 
     greeting = [
@@ -163,8 +238,8 @@ async def cmd_start(message: Message) -> None:
         "━━━━━━━━━━━━━━━",
         "",
         f"📍 Сейчас слежу за: <b>{symbols or 'ничего не выбрано'}</b>",
-        f"⏱ Свечи по <b>{config.get('timeframe')}</b>, "
-        f"общая картина по <b>{config.get('htf_timeframe')}</b>",
+        f"⏱ Свечи по <b>{config.get('timeframe', user_id=uid)}</b>, "
+        f"общая картина по <b>{config.get('htf_timeframe', user_id=uid)}</b>",
     ]
 
     if data["decided"]:
@@ -230,40 +305,40 @@ async def show_help_topic(call: CallbackQuery) -> None:
 @router.message(Command("signals"))
 @router.message(F.text == "🎯 Сигналы")
 async def cmd_signals(message: Message) -> None:
-    text, markup = await screen_signals()
+    text, markup = await screen_signals(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("history"))
 async def cmd_history(message: Message) -> None:
-    text, markup = await screen_history()
+    text, markup = await screen_history(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("stats"))
 @router.message(F.text == "📊 Статистика")
 async def cmd_stats(message: Message) -> None:
-    text, markup = await screen_stats("all")
+    text, markup = await screen_stats(message.from_user.id, "all")
     await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("news"))
 @router.message(F.text == "📰 Новости")
 async def cmd_news(message: Message) -> None:
-    text, markup = await screen_news()
+    text, markup = await screen_news(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("status"))
 @router.message(F.text == "ℹ️ Статус")
 async def cmd_status(message: Message) -> None:
-    text, markup = await screen_status()
+    text, markup = await screen_status(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
-    text, markup = await screen_settings()
+    text, markup = await screen_settings(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
@@ -344,45 +419,120 @@ async def nav_menu(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "nav:signals")
 async def nav_signals(call: CallbackQuery) -> None:
-    text, markup = await screen_signals()
+    text, markup = await screen_signals(call.from_user.id)
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data == "nav:history")
 async def nav_history(call: CallbackQuery) -> None:
-    text, markup = await screen_history()
+    text, markup = await screen_history(call.from_user.id)
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data == "nav:stats")
 async def nav_stats(call: CallbackQuery) -> None:
-    text, markup = await screen_stats("all")
+    text, markup = await screen_stats(call.from_user.id, "all")
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data.startswith("stats:"))
 async def nav_stats_period(call: CallbackQuery) -> None:
     period = call.data.split(":", 1)[1]
-    text, markup = await screen_stats(period)
+    text, markup = await screen_stats(call.from_user.id, period)
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data == "nav:news")
 async def nav_news(call: CallbackQuery) -> None:
-    text, markup = await screen_news()
+    text, markup = await screen_news(call.from_user.id)
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data == "nav:status")
 async def nav_status(call: CallbackQuery) -> None:
-    text, markup = await screen_status()
+    text, markup = await screen_status(call.from_user.id)
     await _render(call, text, markup)
 
 
 @router.callback_query(F.data == "nav:settings")
 async def nav_settings(call: CallbackQuery) -> None:
-    text, markup = await screen_settings()
+    text, markup = await screen_settings(call.from_user.id)
     await _render(call, text, markup)
+
+
+@router.callback_query(F.data == "nav:presets")
+async def nav_presets(call: CallbackQuery) -> None:
+    text, markup = await screen_presets(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data.startswith("preset:"))
+async def choose_preset(call: CallbackQuery) -> None:
+    """Применяет готовый режим целиком."""
+    key = call.data.split(":", 1)[1]
+    uid = call.from_user.id
+    try:
+        preset = await config.apply_preset(key, user_id=uid)
+    except Exception as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+
+    await call.answer(f"{preset.emoji} {preset.name}: {preset.expect}")
+    text, markup = await screen_presets(uid)
+    await _render(call, text, markup)
+
+
+@router.message(Command("alerts"))
+@router.message(F.text == "🔔 Уведомления")
+async def cmd_alerts(message: Message) -> None:
+    text, markup = await screen_alerts(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("alert"))
+async def cmd_alert(message: Message) -> None:
+    """/alert биткоин 95000 — то же самое, что написать это словами."""
+    payload = (message.text or "").partition(" ")[2].strip()
+    if not payload:
+        text, markup = await screen_alerts(message.from_user.id)
+        await message.answer(text, reply_markup=markup)
+        return
+    answer = await create_alert_from_text(message.from_user.id, payload)
+    await message.answer(
+        answer or (
+            "Напишите инструмент и цену: <code>/alert биткоин 95000</code>"
+        )
+    )
+
+
+@router.callback_query(F.data == "nav:alerts")
+async def nav_alerts(call: CallbackQuery) -> None:
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data.startswith("alert:del:"))
+async def drop_alert(call: CallbackQuery) -> None:
+    alert_id = int(call.data.rsplit(":", 1)[1])
+    ok = await repo.cancel_alert(alert_id, owner_id=call.from_user.id)
+    await call.answer("Убрал" if ok else "Уже снято")
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data == "alert:clear")
+async def drop_all_alerts(call: CallbackQuery) -> None:
+    count = await repo.cancel_all_alerts(call.from_user.id)
+    await call.answer(f"Убрано: {count}")
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.message(Command("setup"))
+async def cmd_setup(message: Message) -> None:
+    """Быстрая настройка одной командой."""
+    text, markup = await screen_presets(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("toggle:"))
@@ -391,9 +541,10 @@ async def toggle_setting(call: CallbackQuery) -> None:
     if key not in QUICK_TOGGLES:
         await call.answer("Неизвестная настройка")
         return
-    await config.set(key, not bool(config.get(key)))
-    prefs = await get_prefs()
-    await _render(call, fmt.settings_card(config.all()), kb.settings_screen(prefs))
+    uid = call.from_user.id
+    await config.set(key, not bool(config.get(key, user_id=uid)), user_id=uid)
+    prefs = await get_prefs(uid)
+    await _render(call, fmt.settings_card(config.all(user_id=uid)), kb.settings_screen(prefs))
 
 
 @router.callback_query(F.data.startswith("signal:"))
@@ -422,6 +573,23 @@ async def show_signal(call: CallbackQuery) -> None:
 # Любой другой текст — показываем меню, чтобы пользователь не терялся
 @router.message(F.text)
 async def fallback(message: Message) -> None:
+    """Обычный текст.
+
+    Сначала пробуем прочитать его как заказ уведомления: «биткоин 95000».
+    Это самый естественный способ поставить будильник по цене — человек
+    пишет то, что хочет, а не ищет команду.
+    """
+    answer = await create_alert_from_text(message.from_user.id, message.text)
+    if answer:
+        await message.answer(answer, reply_markup=kb.alert_actions(0))
+        return
+
     await message.answer(
-        "Не понял команду. Вот что я умею:", reply_markup=kb.main_menu()
+        "Не понял. Вот что можно сделать:\n\n"
+        "• <b>Заказать уведомление по цене</b> — просто напишите, "
+        "например: <code>биткоин 95000</code> или <code>золото 4400</code>. "
+        "Я сообщу, когда рынок дойдёт до этой цены.\n"
+        "• Открыть разделы кнопками ниже.\n"
+        "• Спросить у справки: /help",
+        reply_markup=kb.main_menu(),
     )

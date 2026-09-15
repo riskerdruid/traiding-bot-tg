@@ -19,8 +19,12 @@
     overview: null,
     signals: { items: [], filter: 'all' },
     stats: { data: null, period: 'all' },
-    settings: { fields: [], groups: [], readonly: {}, showAdvanced: false },
+    settings: {
+      fields: [], groups: [], readonly: {}, showAdvanced: false,
+      presets: [], preset: null, summary: [], configured: true,
+    },
     news: null,
+    alerts: [],
     chart: null,
     chartSeries: null,
     chartSymbol: null,
@@ -180,6 +184,134 @@
   }
 
   /* ---------------------------------------------------------- Графики SVG */
+
+  /* ------------------------------------------ Всплывающие подсказки */
+
+  // Новичку мало названия настройки — ему нужно знать, что поставить
+  // и что из этого выйдет. Значок «?» рядом с подписью показывает совет:
+  // на компьютере по наведению мыши, на телефоне по нажатию. Разметка
+  // одна и та же, различается только способ вызова.
+
+  const canHover = window.matchMedia
+    ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
+    : false;
+
+  function qmark(text, extra) {
+    if (!text) return '';
+    const full = extra ? text + '\n\n' + extra : text;
+    return '<button type="button" class="qmark" tabindex="0" aria-label="Пояснение"'
+      + ' data-tip="' + escapeHtml(full) + '">?</button>';
+  }
+
+  // Подсказка на слове внутри текста: подчёркнутый термин
+  function qterm(word, text) {
+    return '<span class="qterm" tabindex="0" data-tip="' + escapeHtml(text) + '">'
+      + escapeHtml(word) + '</span>';
+  }
+
+  let tipBox = null;
+  let tipAnchor = null;
+
+  function ensureTipBox() {
+    if (tipBox) return tipBox;
+    tipBox = document.createElement('div');
+    tipBox.className = 'tipbox';
+    tipBox.hidden = true;
+    document.body.appendChild(tipBox);
+    return tipBox;
+  }
+
+  function showTip(anchor) {
+    const text = anchor.getAttribute('data-tip');
+    if (!text) return;
+    const box = ensureTipBox();
+    tipAnchor = anchor;
+    box.innerHTML = text.split('\n\n').map(function (part) {
+      return '<p>' + escapeHtml(part).replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+    box.hidden = false;
+    box.classList.add('visible');
+
+    // Считаем место после показа: до этого размеры неизвестны
+    const pad = 10;
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(300, window.innerWidth - pad * 2);
+    box.style.width = width + 'px';
+    const height = box.offsetHeight;
+
+    let left = rect.left + rect.width / 2 - width / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - width - pad));
+
+    // Снизу, а если там не помещается — сверху
+    let top = rect.bottom + 8;
+    let above = false;
+    if (top + height > window.innerHeight - pad) {
+      const upper = rect.top - height - 8;
+      if (upper > pad) { top = upper; above = true; }
+      else top = Math.max(pad, window.innerHeight - height - pad);
+    }
+    box.classList.toggle('above', above);
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+
+    // Хвостик указывает на сам значок, даже если окошко сдвинули к краю
+    const arrow = Math.max(12, Math.min(rect.left + rect.width / 2 - left, width - 12));
+    box.style.setProperty('--arrow', arrow + 'px');
+  }
+
+  function hideTip() {
+    if (!tipBox || tipBox.hidden) return;
+    tipBox.hidden = true;
+    tipBox.classList.remove('visible');
+    tipAnchor = null;
+  }
+
+  // Значок, который существует только ради пояснения: нажатие на него
+  // ничего больше не делает, поэтому событие можно погасить. А вот
+  // колокольчик у цены — рабочая кнопка с подсказкой: ей нажатие нужно.
+  function isPureHint(el) {
+    return el.classList.contains('qmark')
+      || el.classList.contains('qterm')
+      || el.classList.contains('preset-info');
+  }
+
+  document.addEventListener('click', function (e) {
+    const anchor = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (anchor && isPureHint(anchor)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (tipAnchor === anchor) hideTip();
+      else { showTip(anchor); haptic('light'); }
+      return;
+    }
+    hideTip();
+  }, true);
+
+  if (canHover) {
+    document.addEventListener('mouseover', function (e) {
+      const anchor = e.target.closest ? e.target.closest('[data-tip]') : null;
+      if (anchor && anchor !== tipAnchor) showTip(anchor);
+    });
+    document.addEventListener('mouseout', function (e) {
+      const anchor = e.target.closest ? e.target.closest('[data-tip]') : null;
+      if (anchor && anchor === tipAnchor) hideTip();
+    });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') hideTip();
+    if ((e.key === 'Enter' || e.key === ' ') && document.activeElement
+        && document.activeElement.hasAttribute
+        && document.activeElement.hasAttribute('data-tip')) {
+      e.preventDefault();
+      if (tipAnchor === document.activeElement) hideTip();
+      else showTip(document.activeElement);
+    }
+  });
+
+  window.addEventListener('scroll', hideTip, true);
+  window.addEventListener('resize', hideTip);
+
 
   function donut(percent, size) {
     const s = size || 108;
@@ -375,11 +507,21 @@
       + '</div><span class="chip ' + view.cls + '">' + escapeHtml(chip) + '</span></div>';
 
     html += '<div class="levels binary-levels">'
-      + '<div class="level"><div class="level-label">Вход</div>'
+      + '<div class="level"><div class="level-label">Вход'
+      + qmark('Цена на момент сигнала. Ставку делают от неё: угадали '
+              + 'направление к концу срока — получили выплату.')
+      + '</div>'
       + '<div class="level-value">' + money(signal.entry) + '</div></div>'
-      + '<div class="level"><div class="level-label">Срок</div>'
+      + '<div class="level"><div class="level-label">Срок'
+      + qmark('Через сколько минут подводится итог. У брокера это поле '
+              + 'называется «экспирация» — выставьте там ровно столько же.')
+      + '</div>'
       + '<div class="level-value">' + Math.round(signal.expiry_minutes || 0) + ' мин</div></div>'
-      + '<div class="level tp"><div class="level-label">Выплата</div>'
+      + '<div class="level tp"><div class="level-label">Выплата'
+      + qmark('Сколько брокер добавит к ставке при удаче. 92% значит: '
+              + 'поставили 10 — получите 19.2. При неудаче теряется вся '
+              + 'ставка, поэтому высокая выплата так важна.')
+      + '</div>'
       + '<div class="level-value">' + (signal.payout != null ? Math.round(signal.payout) + '%' : '—')
       + '</div></div></div>';
 
@@ -397,7 +539,11 @@
     }
 
     html += '<div class="confidence">'
-      + '<span class="dim" style="font-size:11px">Уверенность</span>'
+      + '<span class="dim" style="font-size:11px">Уверенность'
+      + qmark('Сколько признаков из проверяемых совпало. Это не вероятность '
+              + 'выигрыша, а мера того, насколько чисто выглядит момент. '
+              + 'Выше 70% — редкий и хорошо сложившийся случай.')
+      + '</span>'
       + '<div class="confidence-track"><div class="confidence-fill" style="width:'
       + signal.confidence + '%;background:' + confidenceColor(signal.confidence) + '"></div></div>'
       + '<span class="confidence-value">' + signal.confidence + '%</span></div>';
@@ -449,11 +595,21 @@
       + '</div><span class="chip ' + view.cls + '">' + escapeHtml(chipText) + '</span></div>';
 
     html += '<div class="levels">'
-      + '<div class="level sl"><div class="level-label">Стоп</div>'
+      + '<div class="level sl"><div class="level-label">Стоп'
+      + qmark('Цена, при которой сделку закрывают с убытком. Страховка: '
+              + 'она ограничивает потерю, если движение пошло не туда. '
+              + 'Ставится у брокера сразу вместе со сделкой.')
+      + '</div>'
       + '<div class="level-value">' + money(signal.stop_loss) + '</div></div>'
-      + '<div class="level"><div class="level-label">Вход</div>'
+      + '<div class="level"><div class="level-label">Вход'
+      + qmark('Цена, по которой имеет смысл открыть сделку. Если рынок '
+              + 'уже ушёл далеко от неё, сигнал лучше пропустить.')
+      + '</div>'
       + '<div class="level-value">' + money(signal.entry) + '</div></div>'
-      + '<div class="level tp"><div class="level-label">Цель</div>'
+      + '<div class="level tp"><div class="level-label">Цель'
+      + qmark('Цена, при которой сделку закрывают с прибылью. Дойдёт '
+              + 'до неё — сигнал засчитан как удачный.')
+      + '</div>'
       + '<div class="level-value">' + money(signal.take_profit) + '</div></div></div>';
 
     if (signal.status === 'ACTIVE' && signal.current_price) {
@@ -469,7 +625,11 @@
     }
 
     html += '<div class="confidence">'
-      + '<span class="dim" style="font-size:11px">Уверенность</span>'
+      + '<span class="dim" style="font-size:11px">Уверенность'
+      + qmark('Сколько признаков из проверяемых совпало. Это не вероятность '
+              + 'выигрыша, а мера того, насколько чисто выглядит момент. '
+              + 'Выше 70% — редкий и хорошо сложившийся случай.')
+      + '</span>'
       + '<div class="confidence-track"><div class="confidence-fill" style="width:'
       + signal.confidence + '%;background:' + confidenceColor(signal.confidence) + '"></div></div>'
       + '<span class="confidence-value">' + signal.confidence + '%</span></div>';
@@ -481,7 +641,11 @@
     }
 
     if (detailed && signal.sizing) {
-      html += '<div class="sizing"><span class="dim">Объём по вашему риску</span>'
+      html += '<div class="sizing"><span class="dim">Объём по вашему риску'
+      + qmark('Посчитан из вашей суммы счёта, допустимого процента потери '
+              + 'и расстояния до стопа. Войдёте этим объёмом — потеряете '
+              + 'при неудаче ровно столько, сколько разрешили себе.')
+      + '</span>'
         + '<b>' + escapeHtml(signal.sizing.units) + '</b></div>';
     }
 
@@ -512,6 +676,132 @@
 
   /* ------------------------------------------------------------- Экраны */
 
+  /* ------------------------------------------ Уведомления по цене */
+
+  // Простая вещь, которую человек понимает без объяснений: назвал цену —
+  // получил сообщение, когда рынок до неё дошёл. Никакой стратегии,
+  // никаких индикаторов. Живёт на главном экране, прямо под ценами.
+
+  function alertRow(item) {
+    const up = item.direction === 'up';
+    const distance = item.distance_pct;
+    return '<div class="alert-row">'
+      + '<span class="alert-dir ' + (up ? 'up' : 'down') + '">'
+      + (up ? '▲' : '▼') + '</span>'
+      + '<span class="alert-body">'
+      + '<span class="alert-title"><b>' + escapeHtml(shortSymbol(item.symbol))
+      + '</b> при ' + money(item.price) + '</span>'
+      + '<span class="alert-meta">'
+      + (item.current_price
+          ? 'сейчас ' + money(item.current_price)
+            + (distance != null ? ' · идти ' + distance.toFixed(2) + '%' : '')
+          : 'цена недоступна')
+      + (item.note ? ' · ' + escapeHtml(item.note) : '')
+      + '</span></span>'
+      + '<button class="alert-del" data-alert-del="' + item.id + '" '
+      + 'aria-label="Убрать">✕</button></div>';
+  }
+
+  function alertsBlock(items, symbols) {
+    let html = '<div class="section-title">Уведомления по цене'
+      + qmark('Вы называете цену — бот пишет, когда рынок до неё дошёл. '
+              + 'Это не сигнал на сделку и не автоторговля, просто '
+              + 'будильник.',
+              '💡 То же самое можно сделать в переписке с ботом: '
+              + 'отправьте ему «биткоин 95000».')
+      + '</div><div class="card">';
+
+    const list = symbols && symbols.length ? symbols : [];
+    if (!list.length) {
+      return html + '<div class="alert-empty">Сначала выберите хотя бы один '
+        + 'инструмент в настройках — тогда можно будет заказать уведомление '
+        + 'по его цене.</div></div>';
+    }
+    html += '<div class="alert-form">'
+      + '<select class="select alert-symbol" id="alert-symbol">'
+      + list.map(function (s) {
+          return '<option value="' + escapeHtml(s) + '">'
+            + escapeHtml(shortSymbol(s)) + '</option>';
+        }).join('')
+      + '</select>'
+      + '<input class="text-input alert-price" id="alert-price" type="text" '
+      + 'inputmode="decimal" placeholder="цена, например 95000">'
+      + '<button class="btn-primary alert-add" id="alert-add">Сообщить</button>'
+      + '</div>';
+
+    if (!items || !items.length) {
+      html += '<div class="alert-empty">Пока ничего не заказано. '
+        + 'Выберите инструмент, впишите цену — и я напишу, когда рынок '
+        + 'её достигнет.</div>';
+    } else {
+      html += '<div class="alert-list">' + items.map(alertRow).join('') + '</div>';
+    }
+
+    return html + '</div>';
+  }
+
+  function bindAlerts() {
+    const add = document.getElementById('alert-add');
+    if (add) add.addEventListener('click', async function () {
+      const symbol = document.getElementById('alert-symbol');
+      const price = document.getElementById('alert-price');
+      if (!symbol || !price) return;
+      const value = String(price.value).replace(',', '.').trim();
+      if (!value) {
+        toast('Впишите цену', 'error');
+        haptic('error');
+        return;
+      }
+      add.disabled = true;
+      try {
+        const created = await api('/api/alerts', {
+          method: 'POST',
+          body: JSON.stringify({ symbol: symbol.value, price: value }),
+        });
+        haptic('success');
+        const side = created.direction === 'up' ? 'вырастет' : 'опустится';
+        toast('Сообщу, когда ' + shortSymbol(created.symbol) + ' ' + side
+              + ' до ' + money(created.price));
+        price.value = '';
+        loadScreen('overview', true);
+      } catch (err) {
+        haptic('error');
+        toast(err.message, 'error');
+      } finally {
+        add.disabled = false;
+      }
+    });
+
+    document.querySelectorAll('[data-alert-del]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        haptic('light');
+        try {
+          await api('/api/alerts/' + btn.dataset.alertDel, { method: 'DELETE' });
+          toast('Убрал');
+          loadScreen('overview', true);
+        } catch (err) {
+          haptic('error');
+          toast(err.message, 'error');
+        }
+      });
+    });
+
+    // Нажатие по цене инструмента подставляет её в поле: чаще всего
+    // уровень заказывают недалеко от текущей цены
+    document.querySelectorAll('[data-price-of]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const symbol = document.getElementById('alert-symbol');
+        const price = document.getElementById('alert-price');
+        if (!symbol || !price) return;
+        symbol.value = btn.dataset.priceOf;
+        price.value = btn.dataset.priceValue;
+        price.focus();
+        price.select();
+        haptic('select');
+      });
+    });
+  }
+
   function renderOverview(data) {
     let html = '<div class="screen">';
 
@@ -526,7 +816,9 @@
     if (!data.scanner || !data.scanner.running) {
       html += '<div class="banner"><div class="banner-icon">⚠️</div><div>'
         + '<div class="banner-title">Сканер не запущен</div>'
-        + '<div class="banner-text">Бот не анализирует рынок.</div></div></div>';
+        + '<div class="banner-text">Бот не анализирует рынок, сигналов '
+        + 'не будет. Обычно это значит, что не выбран ни один инструмент '
+        + 'или программу только что перезапустили.</div></div></div>';
     }
 
     const symbols = Object.keys(data.prices || {});
@@ -535,7 +827,12 @@
       symbols.forEach(function (symbol) {
         html += '<div class="card price-card" data-sym="' + escapeHtml(symbol) + '"><div>'
           + '<div class="price-symbol">' + escapeHtml(shortSymbol(symbol)) + '</div>'
-          + '<div class="price-value">' + money(data.prices[symbol]) + '</div></div></div>';
+          + '<div class="price-value">' + money(data.prices[symbol]) + '</div></div>'
+          + '<button class="price-bell" data-price-of="' + escapeHtml(symbol) + '" '
+          + 'data-price-value="' + data.prices[symbol] + '" '
+          + 'data-tip="Поставить уведомление по этой цене: подставлю её '
+          + 'в поле ниже, останется поправить нужное вам число.">🔔</button>'
+          + '</div>';
       });
       html += '<div class="card" style="margin-top:12px">'
         + '<div class="chart-head"><b id="chart-label">График</b>'
@@ -543,11 +840,19 @@
         + '<div id="candles" class="candles"></div></div>';
     }
 
+    html += alertsBlock(
+      state.alerts,
+      (data.config && data.config.symbols && data.config.symbols.length)
+        ? data.config.symbols : symbols
+    );
+
     html += '<div class="section-title">Активные сигналы'
       + (data.active.length ? ' · ' + data.active.length : '') + '</div>';
     if (!data.active.length) {
       html += '<div class="card">' + emptyState('🎯', 'Пока тихо',
-        'Бот следит за рынком и пришлёт сигнал, как только появится подходящая точка входа.')
+        'Бот следит за рынком и пришлёт сигнал, как только появится '
+        + 'подходящая точка входа. Ничего делать не нужно — просто ждите '
+        + 'сообщения.')
         + '</div>';
     } else {
       data.active.forEach(function (s) { html += signalCard(s, true); });
@@ -556,12 +861,23 @@
     const today = data.stats_today, all = data.stats_all;
     html += '<div class="section-title">Сегодня</div><div class="grid-3">'
       + '<div class="metric"><div class="metric-value">' + (today.decided + today.active) + '</div>'
-      + '<div class="metric-label">сигналов</div></div>'
+      + '<div class="metric-label">сигналов'
+      + qmark('Сколько точек входа бот нашёл за сегодня — и завершённых, '
+              + 'и тех, что ещё в работе.')
+      + '</div></div>'
       + '<div class="metric"><div class="metric-value ' + (today.decided ? signClass(today.winrate - 50) : 'dim') + '">'
-      + (today.decided ? today.winrate + '%' : '—') + '</div><div class="metric-label">точность</div></div>'
+      + (today.decided ? today.winrate + '%' : '—') + '</div>'
+      + '<div class="metric-label">точность'
+      + qmark('Доля сигналов, дошедших до цели, а не до страховки. '
+              + '50% — это не провал: при цели вдвое дальше страховки '
+              + 'половины достаточно, чтобы зарабатывать.')
+      + '</div></div>'
       + '<div class="metric"><div class="metric-value ' + signClass(today.total_r) + '">'
       + (today.total_r > 0 ? '+' : '') + today.total_r.toFixed(1) + 'R</div>'
-      + '<div class="metric-label">результат</div></div></div>';
+      + '<div class="metric-label">результат'
+      + qmark('Итог дня, измеренный размером вашего риска. +2R значит: '
+              + 'заработали вдвое больше, чем рисковали в одной сделке.')
+      + '</div></div></div>';
 
     if (all.decided > 0) {
       html += '<div class="note">За всё время: <b>' + all.decided + '</b> завершённых, '
@@ -580,7 +896,12 @@
       + '<span class="dim nums">' + (scanner.scans_done || 0) + '</span></div>'
       + '<div class="switch-row"><span class="switch-label">Работает без сбоев</span>'
       + '<span class="dim nums">' + (hours ? hours + ' ч ' : '') + minutes + ' мин</span></div>'
-      + '<div class="switch-row"><span class="switch-label">Таймфрейм</span>'
+      + '<div class="switch-row"><span class="switch-label">Длина свечи'
+      + qmark('Первое число — график, по которому ищутся входы. '
+              + 'Второе — более длинный график для общего направления '
+              + 'рынка. 15m / 1h читается так: решение раз в 15 минут, '
+              + 'направление — по часу.')
+      + '</span>'
       + '<span class="dim nums">' + escapeHtml(data.config.timeframe) + ' / '
       + escapeHtml(data.config.htf_timeframe) + '</span></div></div>';
 
@@ -628,11 +949,16 @@
     html += '<div class="card"><div class="donut-wrap">' + donut(s.winrate)
       + '<div class="donut-legend">'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--green)"></span>'
-      + '<span class="legend-label">Угадал</span><span class="legend-value">' + s.wins + '</span></div>'
+      + '<span class="legend-label">Угадал'
+      + qmark('Сигналы, где цена дошла до цели раньше, чем до страховки.')
+      + '</span><span class="legend-value">' + s.wins + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--red)"></span>'
       + '<span class="legend-label">Не угадал</span><span class="legend-value">' + s.losses + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--muted)"></span>'
-      + '<span class="legend-label">Истекли</span><span class="legend-value">' + s.expired + '</span></div>'
+      + '<span class="legend-label">Истекли'
+      + qmark('Цена не дошла ни до цели, ни до страховки за отведённое '
+              + 'время. Такие не считаются ни удачей, ни неудачей.')
+      + '</span><span class="legend-value">' + s.expired + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--amber)"></span>'
       + '<span class="legend-label">В работе</span><span class="legend-value">' + s.active + '</span></div>'
       + '</div></div>';
@@ -646,12 +972,24 @@
     html += '<div class="grid-3" style="margin-top:12px">'
       + '<div class="metric"><div class="metric-value ' + signClass(s.total_r) + '">'
       + (s.total_r > 0 ? '+' : '') + s.total_r.toFixed(1) + 'R</div>'
-      + '<div class="metric-label">итог в размерах риска</div></div>'
+      + '<div class="metric-label">итог в размерах риска'
+      + qmark('Сумма всех результатов, измеренная тем, чем вы рисковали '
+              + 'в одной сделке. +5R значит: заработали впятеро больше, чем '
+              + 'ставили под удар за раз. При риске 10 USDT это +50 USDT.')
+      + '</div></div>'
       + '<div class="metric"><div class="metric-value ' + signClass(s.avg_r) + '">'
       + (s.avg_r > 0 ? '+' : '') + s.avg_r.toFixed(2) + 'R</div>'
-      + '<div class="metric-label">в среднем за сигнал</div></div>'
+      + '<div class="metric-label">в среднем за сигнал'
+      + qmark('Сколько в среднем приносит один сигнал. Главное число: '
+              + 'пока оно выше нуля, стратегия зарабатывает, даже если '
+              + 'угадывает меньше половины раз.')
+      + '</div></div>'
       + '<div class="metric"><div class="metric-value">' + s.profit_factor + '</div>'
-      + '<div class="metric-label">прибыль / убыток</div></div></div>';
+      + '<div class="metric-label">прибыль / убыток'
+      + qmark('Во сколько раз заработанное больше потерянного. 1.0 — вышли '
+              + 'в ноль, 1.5 — на каждый потерянный рубль приходится '
+              + 'полтора заработанных. Ниже 1.0 — стратегия в минусе.')
+      + '</div></div></div>';
 
     if (payload.equity && payload.equity.length > 1) {
       html += '<div class="section-title">Как рос счёт</div><div class="card">'
@@ -676,7 +1014,10 @@
     }
 
     html += '<div class="section-title">Подробности</div><div class="card">'
-      + '<div class="switch-row"><span class="switch-label">Средняя прибыль</span>'
+      + '<div class="switch-row"><span class="switch-label">Средняя прибыль'
+      + qmark('На сколько процентов в среднем сдвинулась цена в удачных '
+              + 'сигналах — от входа до цели.')
+      + '</span>'
       + '<span class="pos nums">' + pct(s.avg_win_pct) + '</span></div>'
       + '<div class="switch-row"><span class="switch-label">Средний убыток</span>'
       + '<span class="neg nums">' + pct(s.avg_loss_pct) + '</span></div>'
@@ -686,13 +1027,33 @@
       + '<span class="neg nums">' + pct(s.worst_pct) + '</span></div>'
       + '<div class="switch-row"><span class="switch-label">Удач подряд, максимум</span>'
       + '<span class="nums">' + s.max_win_streak + ' подряд</span></div>'
-      + '<div class="switch-row"><span class="switch-label">Неудач подряд, максимум</span>'
+      + '<div class="switch-row"><span class="switch-label">Неудач подряд, максимум'
+      + qmark('Самая длинная череда потерь. Полезно знать заранее: если '
+              + 'подряд идёт семь неудач при риске 1%, счёт худеет '
+              + 'примерно на 7%. Это нормальная работа, а не поломка.')
+      + '</span>'
       + '<span class="nums">' + s.max_loss_streak + ' подряд</span></div></div>';
 
     return html + '</div>';
   }
 
   /* --------------------------------------------- Экран настроек */
+
+  // Пояснение к каждой группе настроек: человек должен понимать, зачем
+  // вообще целый раздел, а не только что делает отдельная строка.
+  const GROUP_TIPS = {
+    market: 'Какие инструменты бот смотрит и на каком графике. '
+      + 'Отсюда начинают: без инструмента следить не за чем.',
+    strategy: 'Насколько бот придирчив. Здесь решается, сколько сигналов '
+      + 'вы будете получать — раз в неделю или каждый час.',
+    risk: 'Деньги. По этим числам считается размер сделки в карточке '
+      + 'сигнала и расстояние до страховки.',
+    binary: 'Нужно только для Pocket Option. Если торгуете на бирже, '
+      + 'раздел можно не трогать.',
+    news: 'В момент выхода важной статистики цена скачет на новости, '
+      + 'а не по графику. Здесь бот учится молчать в такие минуты.',
+    notify: 'Какие сообщения приходят вам в Telegram и когда.',
+  };
 
   function controlFor(f) {
     const id = 'f-' + f.key;
@@ -742,12 +1103,80 @@
       + '" id="' + id + '" value="' + escapeHtml(String(value == null ? '' : value)) + '">';
   }
 
+  // Готовые режимы. Выбрать цель человеку по силам, а выставить два
+  // десятка чисел — нет, поэтому карточки стоят выше всех настроек.
+  function presetCards(presets, current) {
+    if (!presets || !presets.length) return '';
+    let html = '<div class="section-title">Режим работы'
+      + qmark('Готовый набор настроек под одну цель. Нажмите — и все '
+              + 'значения ниже выставятся сами. Потом любое из них можно '
+              + 'поправить вручную.') + '</div>';
+
+    html += '<div class="preset-grid">';
+    presets.forEach(function (p) {
+      const active = current === p.key;
+      html += '<button class="preset' + (active ? ' active' : '') + '" data-preset="'
+        + escapeHtml(p.key) + '">'
+        + '<span class="preset-emoji">' + p.emoji + '</span>'
+        + '<span class="preset-body">'
+        + '<span class="preset-name">' + escapeHtml(p.name)
+        + (active ? '<i class="preset-mark">включён</i>' : '') + '</span>'
+        + '<span class="preset-summary">' + escapeHtml(p.summary) + '</span>'
+        + '<span class="preset-expect">' + escapeHtml(p.expect) + '</span>'
+        + '</span>'
+        + '<span class="preset-info" data-tip="' + escapeHtml(p.detail) + '">?</span>'
+        + '</button>';
+    });
+    html += '</div>';
+
+    if (!current) {
+      html += '<div class="note">Сейчас работают ваши собственные значения — '
+        + 'ни один готовый режим им не соответствует. Это нормально. '
+        + 'Выберите режим, если хотите начать с чистого листа.</div>';
+    }
+    return html;
+  }
+
+  // Настройки, разложенные по группам, не отвечают на главный вопрос
+  // новичка: «а что в итоге происходит?». Поэтому сверху — несколько
+  // фраз обычными словами.
+  function summaryCard(lines) {
+    if (!lines || !lines.length) return '';
+    return '<div class="card summary-card">'
+      + '<div class="summary-head">📋 Что бот делает прямо сейчас</div>'
+      + '<ul class="summary-list">'
+      + lines.map(function (l) { return '<li>' + escapeHtml(l) + '</li>'; }).join('')
+      + '</ul></div>';
+  }
+
   function renderSettings(data, news) {
     const advanced = state.settings.showAdvanced;
     let html = '<div class="screen">';
 
-    html += '<div class="note" style="margin-bottom:14px">Все изменения '
-      + 'применяются сразу — перезапускать бота не нужно.</div>';
+    if (!state.settings.configured) {
+      html += '<div class="banner start-banner"><div class="banner-icon">👋</div>'
+        + '<div><div class="banner-title">Настроим за минуту</div>'
+        + '<div class="banner-text">Три вопроса обычными словами — и бот '
+        + 'готов к работе. Ничего технического спрашивать не буду.</div>'
+        + '<button class="btn-primary" data-wizard="1">Начать настройку</button>'
+        + '</div></div>';
+    }
+
+    html += presetCards(state.settings.presets, state.settings.preset);
+    html += summaryCard(state.settings.summary);
+
+    html += '<div class="mode-switch">'
+      + '<button class="mode-btn' + (advanced ? '' : ' active') + '" data-adv="0">'
+      + 'Основное</button>'
+      + '<button class="mode-btn' + (advanced ? ' active' : '') + '" data-adv="1">'
+      + 'Все настройки</button>'
+      + qmark('«Основное» — то, что имеет смысл менять. «Все настройки» '
+              + 'добавляет внутренние параметры индикаторов: их трогают, '
+              + 'когда точно знают зачем.') + '</div>';
+
+    html += '<div class="note" style="margin-bottom:14px">Всё сохраняется сразу, '
+      + 'перезапускать бота не нужно. Не понимаете строку — нажмите '
+      + '<b>?</b> рядом с её названием.</div>';
 
     data.groups.forEach(function (group) {
       const fields = data.fields.filter(function (f) {
@@ -755,7 +1184,9 @@
       });
       if (!fields.length) return;
 
-      html += '<div class="section-title">' + escapeHtml(group.label) + '</div><div class="card">';
+      html += '<div class="section-title">' + escapeHtml(group.label)
+        + (GROUP_TIPS[group.key] ? qmark(GROUP_TIPS[group.key]) : '')
+        + '</div><div class="card">';
       fields.forEach(function (f) {
         // Списку инструментов и текстовым полям с длинной подсказкой
         // тесно в узкой колонке — разворачиваем строку на всю ширину
@@ -763,18 +1194,13 @@
         html += '<div class="setting-row' + (wide ? ' wide' : '') + '"><div class="setting-info">'
           + '<div class="setting-label">' + escapeHtml(f.label)
           + (f.unit && f.kind !== 'bool' ? ' <span class="dim">' + escapeHtml(f.unit) + '</span>' : '')
+          + qmark(f.hint, f.tip ? '💡 ' + f.tip : '')
           + '</div>'
           + (f.hint ? '<div class="setting-hint">' + escapeHtml(f.hint) + '</div>' : '')
           + '</div><div class="setting-control">' + controlFor(f) + '</div></div>';
       });
       html += '</div>';
     });
-
-    html += '<div class="card" style="margin-top:12px">'
-      + '<div class="switch-row"><div><div class="switch-label">Показать все параметры</div>'
-      + '<div class="switch-hint">Тонкая настройка индикаторов — меняйте, '
-      + 'только если понимаете, что делаете</div></div>'
-      + '<button class="switch' + (advanced ? ' on' : '') + '" id="toggle-advanced"></button></div></div>';
 
     // Календарь новостей — рядом с настройкой фильтра, так понятнее
     if (news) {
@@ -825,6 +1251,15 @@
       + '<div class="switch-row"><span class="switch-label">Часовой пояс</span>'
       + '<span class="dim">' + escapeHtml(ro.timezone || '—') + '</span></div></div>'
       + '<div class="note">Эти два значения задаёт разработчик при установке.</div>';
+
+    // Возможность пройти вопросник ещё раз: настройки легко запутать,
+    // а вернуться к понятному началу должно быть просто
+    html += '<div class="card" style="margin-top:12px">'
+      + '<div class="switch-row"><div><div class="switch-label">Пройти настройку заново</div>'
+      + '<div class="switch-hint">Три вопроса обычными словами — '
+      + 'если запутались в значениях</div></div>'
+      + '<button class="btn-ghost" data-wizard="1" style="margin:0">Начать</button>'
+      + '</div></div>';
 
     return html + '</div>';
   }
@@ -902,6 +1337,9 @@
     try {
       const result = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
       state.settings.fields = result.fields;
+      if (result.summary) state.settings.summary = result.summary;
+      if ('preset' in result) state.settings.preset = result.preset;
+      state.settings.configured = true;
       haptic('success');
       toast('Сохранено');
       return true;
@@ -1031,6 +1469,248 @@
     document.getElementById('sheet').hidden = true;
   }
 
+  /* ------------------------------------------- Пошаговая настройка */
+
+  // Экран настроек честно показывает всё, что можно менять, — и именно
+  // поэтому пугает человека, который открыл бота впервые. Вопросник
+  // задаёт три вопроса обычными словами и выставляет за него всё
+  // остальное. Запускается сам при первом заходе; вернуться к нему
+  // можно кнопкой в настройках.
+
+  const wizard = {
+    step: 0,
+    market: 'ex',
+    preset: 'balanced',
+    deposit: 1000,
+    risk: 1,
+    busy: false,
+  };
+
+  const MARKET_CHOICES = [
+    {
+      key: 'ex',
+      emoji: '🥇',
+      name: 'Золото и криптовалюта',
+      text: 'Обычная биржа. Ничего дополнительно вводить не нужно — '
+        + 'котировки уже подключены.',
+      symbols: ['XAU/USDT:USDT', 'BTC/USDT:USDT'],
+    },
+    {
+      key: 'po',
+      emoji: '📈',
+      name: 'Опционы Pocket Option',
+      text: 'Валютные пары у брокера, в том числе круглосуточные. '
+        + 'Понадобится ключ доступа — как его взять, написано в «Помощи».',
+      symbols: ['po:EURUSD_otc', 'po:GBPUSD_otc'],
+    },
+    {
+      key: 'both',
+      emoji: '🔀',
+      name: 'И то, и другое',
+      text: 'Сигналы с обеих площадок сразу. Позже лишнее можно убрать '
+        + 'одним нажатием.',
+      symbols: ['XAU/USDT:USDT', 'po:EURUSD_otc'],
+    },
+  ];
+
+  function wizardStepMarket() {
+    let html = '<div class="wz-title">Чем собираетесь торговать?</div>'
+      + '<div class="wz-sub">От этого зависит, за какими графиками следить. '
+      + 'Выбор можно поменять в любой момент.</div>';
+    MARKET_CHOICES.forEach(function (m) {
+      html += '<button class="wz-option' + (wizard.market === m.key ? ' active' : '')
+        + '" data-market="' + m.key + '">'
+        + '<span class="wz-option-emoji">' + m.emoji + '</span>'
+        + '<span><b>' + escapeHtml(m.name) + '</b>'
+        + '<span class="wz-option-text">' + escapeHtml(m.text) + '</span></span>'
+        + '</button>';
+    });
+    return html;
+  }
+
+  function wizardStepPreset() {
+    let html = '<div class="wz-title">Как часто присылать сигналы?</div>'
+      + '<div class="wz-sub">Чем чаще — тем больше среди них случайных. '
+      + 'Если сомневаетесь, берите середину.</div>';
+    (state.settings.presets || []).forEach(function (p) {
+      html += '<button class="wz-option' + (wizard.preset === p.key ? ' active' : '')
+        + '" data-wpreset="' + escapeHtml(p.key) + '">'
+        + '<span class="wz-option-emoji">' + p.emoji + '</span>'
+        + '<span><b>' + escapeHtml(p.name) + '</b>'
+        + '<span class="wz-option-text">' + escapeHtml(p.summary) + ' — '
+        + escapeHtml(p.expect) + '</span></span>'
+        + '</button>';
+    });
+    return html;
+  }
+
+  function wizardStepMoney() {
+    const perTrade = wizard.deposit * wizard.risk / 100;
+    return '<div class="wz-title">Сколько денег на счёте?</div>'
+      + '<div class="wz-sub">Нужно только для одной строки в сигнале — '
+      + 'каким объёмом входить. Цифра остаётся у вас: она не уходит '
+      + 'ни брокеру, ни куда-либо ещё.</div>'
+      + '<label class="wz-field"><span>Сумма счёта, USDT</span>'
+      + '<input class="wz-input" id="wz-deposit" type="text" inputmode="decimal" value="'
+      + escapeHtml(String(wizard.deposit)) + '"></label>'
+      + '<label class="wz-field"><span>Готов потерять на одной сделке, %'
+      + qmark('1% — то, с чего начинают все. Десять неудач подряд заберут '
+              + 'около 10% счёта, и это переживаемо. При 10% те же десять '
+              + 'неудач заберут почти всё.') + '</span>'
+      + '<input class="wz-input" id="wz-risk" type="text" inputmode="decimal" value="'
+      + escapeHtml(String(wizard.risk)) + '"></label>'
+      + '<div class="wz-calc">Это примерно <b>' + money(perTrade)
+      + '</b> риска на одну сделку.</div>';
+  }
+
+  function wizardStepDone() {
+    const market = MARKET_CHOICES.filter(function (m) { return m.key === wizard.market; })[0];
+    const preset = (state.settings.presets || []).filter(function (p) {
+      return p.key === wizard.preset;
+    })[0];
+    return '<div class="wz-title">Всё, готово</div>'
+      + '<div class="wz-sub">Вот что получилось. Любую строчку можно '
+      + 'поменять в настройках.</div>'
+      + '<ul class="summary-list">'
+      + '<li>Торгуем: ' + escapeHtml(market ? market.name : '—') + '</li>'
+      + '<li>Режим: ' + escapeHtml(preset ? preset.name + ' — ' + preset.expect : '—') + '</li>'
+      + '<li>Счёт: ' + money(wizard.deposit) + ', риск ' + wizard.risk + '% — это '
+      + money(wizard.deposit * wizard.risk / 100) + ' на сделку</li>'
+      + '</ul>'
+      + (wizard.market !== 'ex'
+          ? '<div class="note">Для опционов ещё понадобится ключ доступа '
+            + 'Pocket Option. Откройте «Помощь» — там пошагово, с картинками.</div>'
+          : '');
+  }
+
+  const WIZARD_STEPS = [
+    { render: wizardStepMarket, next: 'Дальше' },
+    { render: wizardStepPreset, next: 'Дальше' },
+    { render: wizardStepMoney, next: 'Применить' },
+    { render: wizardStepDone, next: 'Понятно' },
+  ];
+
+  function renderWizard() {
+    const box = document.getElementById('wizard-body');
+    const step = WIZARD_STEPS[wizard.step];
+    let dots = '';
+    WIZARD_STEPS.forEach(function (_, i) {
+      dots += '<i class="wz-dot' + (i === wizard.step ? ' active' : '')
+        + (i < wizard.step ? ' done' : '') + '"></i>';
+    });
+
+    box.innerHTML = '<div class="wz-dots">' + dots + '</div>'
+      + '<div class="wz-body">' + step.render() + '</div>'
+      + '<div class="wz-actions">'
+      + (wizard.step > 0 && wizard.step < WIZARD_STEPS.length - 1
+          ? '<button class="btn-ghost" id="wz-back">Назад</button>' : '')
+      + '<button class="btn-primary" id="wz-next"' + (wizard.busy ? ' disabled' : '') + '>'
+      + (wizard.busy ? 'Сохраняю…' : step.next) + '</button></div>';
+
+    bindWizard();
+  }
+
+  function bindWizard() {
+    document.querySelectorAll('[data-market]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        wizard.market = btn.dataset.market;
+        haptic('select');
+        renderWizard();
+      });
+    });
+    document.querySelectorAll('[data-wpreset]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        wizard.preset = btn.dataset.wpreset;
+        haptic('select');
+        renderWizard();
+      });
+    });
+
+    const dep = document.getElementById('wz-deposit');
+    const risk = document.getElementById('wz-risk');
+    function recalc() {
+      wizard.deposit = Math.max(0, parseFloat(String(dep.value).replace(',', '.')) || 0);
+      wizard.risk = Math.max(0.1, parseFloat(String(risk.value).replace(',', '.')) || 1);
+      const calc = document.querySelector('.wz-calc');
+      if (calc) {
+        calc.innerHTML = 'Это примерно <b>'
+          + money(wizard.deposit * wizard.risk / 100) + '</b> риска на одну сделку.';
+      }
+    }
+    if (dep && risk) {
+      dep.addEventListener('input', recalc);
+      risk.addEventListener('input', recalc);
+    }
+
+    const back = document.getElementById('wz-back');
+    if (back) back.addEventListener('click', function () {
+      wizard.step -= 1;
+      haptic('light');
+      renderWizard();
+    });
+
+    document.getElementById('wz-next').addEventListener('click', async function () {
+      if (wizard.busy) return;
+      if (wizard.step === WIZARD_STEPS.length - 1) {
+        closeWizard();
+        return;
+      }
+      if (wizard.step === WIZARD_STEPS.length - 2) {
+        await applyWizard();
+        return;
+      }
+      wizard.step += 1;
+      haptic('light');
+      renderWizard();
+    });
+  }
+
+  async function applyWizard() {
+    const market = MARKET_CHOICES.filter(function (m) { return m.key === wizard.market; })[0];
+    wizard.busy = true;
+    renderWizard();
+    try {
+      // Сначала режим целиком, потом личные значения: иначе режим
+      // перезапишет введённые сумму счёта и риск
+      await api('/api/config/preset/' + encodeURIComponent(wizard.preset), { method: 'POST' });
+      await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbols: market ? market.symbols : ['XAU/USDT:USDT'],
+          deposit: wizard.deposit,
+          risk_per_trade: wizard.risk,
+        }),
+      });
+      haptic('success');
+      wizard.step += 1;
+      state.settings.configured = true;
+    } catch (err) {
+      haptic('error');
+      toast(err.message, 'error');
+    } finally {
+      wizard.busy = false;
+      renderWizard();
+    }
+  }
+
+  function openWizard(fromStart) {
+    wizard.step = 0;
+    wizard.busy = false;
+    const field = fieldByKey('deposit');
+    if (field) wizard.deposit = field.value || 1000;
+    const riskField = fieldByKey('risk_per_trade');
+    if (riskField) wizard.risk = riskField.value || 1;
+    if (state.settings.preset) wizard.preset = state.settings.preset;
+    document.getElementById('wizard').hidden = false;
+    renderWizard();
+    if (fromStart) haptic('select');
+  }
+
+  function closeWizard() {
+    document.getElementById('wizard').hidden = true;
+    loadScreen('settings');
+  }
+
   /* --------------------------------------------------------- Загрузка */
 
   const content = document.getElementById('content');
@@ -1054,9 +1734,14 @@
 
     try {
       if (screen === 'overview') {
-        const data = await api('/api/overview');
+        const [data, alerts] = await Promise.all([
+          api('/api/overview'),
+          api('/api/alerts').catch(function () { return { items: [] }; }),
+        ]);
         state.overview = data;
+        state.alerts = alerts.items || [];
         content.innerHTML = renderOverview(data);
+        bindAlerts();
         updateBadge(data.active.length);
         setLive(data.scanner && data.scanner.running);
         drawCandles(null, data.active);
@@ -1088,10 +1773,20 @@
         state.settings.fields = cfg.fields;
         state.settings.groups = cfg.groups;
         state.settings.readonly = cfg.readonly;
+        state.settings.presets = cfg.presets || [];
+        state.settings.preset = cfg.preset || null;
+        state.settings.summary = cfg.summary || [];
+        state.settings.configured = cfg.configured !== false;
         state.news = news;
         content.innerHTML = renderSettings(
           { fields: cfg.fields, groups: cfg.groups, readonly: cfg.readonly }, news);
         bindSettings();
+        // Человек, открывший настройки впервые, видит вопросник, а не
+        // простыню параметров. Второй раз он уже не появится.
+        if (!state.settings.configured && !wizardShown) {
+          wizardShown = true;
+          openWizard(false);
+        }
       }
     } catch (err) {
       setLive(false);
@@ -1219,18 +1914,50 @@
       btn.addEventListener('click', function () { toggleSymbol(btn.dataset.remove); });
     });
 
-    const adv = document.getElementById('toggle-advanced');
-    if (adv) adv.addEventListener('click', function () {
-      state.settings.showAdvanced = !state.settings.showAdvanced;
-      haptic('select');
-      content.innerHTML = renderSettings({
-        fields: state.settings.fields,
-        groups: state.settings.groups,
-        readonly: state.settings.readonly,
-      }, state.news);
-      bindSettings();
+    // Готовые режимы
+    document.querySelectorAll('[data-preset]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        if (btn.classList.contains('active')) return;
+        haptic('light');
+        btn.classList.add('busy');
+        try {
+          const result = await api(
+            '/api/config/preset/' + encodeURIComponent(btn.dataset.preset),
+            { method: 'POST' }
+          );
+          haptic('success');
+          toast('Режим «' + result.name + '»: ' + result.expect);
+          loadScreen('settings');
+        } catch (err) {
+          haptic('error');
+          toast(err.message, 'error');
+          btn.classList.remove('busy');
+        }
+      });
+    });
+
+    document.querySelectorAll('[data-wizard]').forEach(function (btn) {
+      btn.addEventListener('click', function () { openWizard(true); });
+    });
+
+    // Основное / все настройки
+    document.querySelectorAll('[data-adv]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const next = btn.dataset.adv === '1';
+        if (next === state.settings.showAdvanced) return;
+        state.settings.showAdvanced = next;
+        haptic('select');
+        content.innerHTML = renderSettings({
+          fields: state.settings.fields,
+          groups: state.settings.groups,
+          readonly: state.settings.readonly,
+        }, state.news);
+        bindSettings();
+      });
     });
   }
+
+  let wizardShown = false;
 
   let commitTimer = null;
   function commitNumber(key, input) {

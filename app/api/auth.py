@@ -74,6 +74,18 @@ def verify_init_data(init_data: str, bot_token: str) -> dict | None:
     return pairs
 
 
+def current_user_id(auth: dict) -> int | None:
+    """Кто прислал запрос. В режиме разработки — первый из списка."""
+    user = (auth or {}).get("user") or {}
+    uid = user.get("id")
+    if uid:
+        return int(uid)
+    if auth.get("dev"):
+        owners = settings.owner_id_list
+        return owners[0] if owners else None
+    return None
+
+
 async def require_owner(
     x_telegram_init_data: str = Header(default=""),
 ) -> dict:

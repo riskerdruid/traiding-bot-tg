@@ -28,18 +28,30 @@ class Notifier:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
 
-    def _is_quiet_now(self) -> bool:
-        """Действует ли сейчас режим «не беспокоить»."""
+    def _is_quiet_now(self, owner_id: int | None = None) -> bool:
+        """Действует ли сейчас режим «не беспокоить» у этого получателя."""
         now_hm = datetime.now(settings.tz).strftime("%H:%M")
-        return config.in_quiet_hours(now_hm)
+        return config.in_quiet_hours(now_hm, user_id=owner_id)
 
-    async def _send(self, text: str, markup=None, respect_quiet: bool = False) -> int:
-        """Отправляет всем владельцам. Возвращает число успешных отправок."""
-        if respect_quiet and self._is_quiet_now():
-            log.info("Режим «не беспокоить» — сообщение не отправлено")
-            return 0
+    async def _send(
+        self,
+        text: str,
+        markup=None,
+        respect_quiet: bool = False,
+        to_owner: int | None = None,
+    ) -> int:
+        """Отправляет сообщение.
+
+        `to_owner` — адресовать одному получателю. Сигнал принадлежит тому,
+        по чьим настройкам он найден, и другим он не нужен: у них другие
+        инструменты и пороги.
+        """
+        targets = [to_owner] if to_owner else list(settings.owner_id_list)
         sent = 0
-        for chat_id in settings.owner_id_list:
+        for chat_id in targets:
+            if respect_quiet and self._is_quiet_now(chat_id):
+                log.info("Получатель %s: режим «не беспокоить»", chat_id)
+                continue
             try:
                 await self.bot.send_message(
                     chat_id, text, reply_markup=markup, disable_web_page_preview=True
@@ -78,7 +90,8 @@ class Notifier:
     # ----------------------------------------------------------------
 
     async def send_signal(self, signal: repo.Signal) -> None:
-        if not config.get("notify_signals"):
+        owner = signal.owner_id
+        if not config.get("notify_signals", user_id=owner):
             log.info("Сигнал #%d не отправлен: уведомления выключены", signal.id)
             return
 
@@ -86,28 +99,36 @@ class Notifier:
             fmt.signal_card(signal),
             kb.signal_actions(signal.id),
             respect_quiet=True,
+            to_owner=owner,
         )
         if sent:
             await repo.mark_notified(signal.id)
 
     async def send_outcome(self, signal: repo.Signal) -> None:
-        if not config.get("notify_outcomes"):
+        owner = signal.owner_id
+        if not config.get("notify_outcomes", user_id=owner):
             return
-        await self._send(fmt.outcome_card(signal), respect_quiet=True)
+        await self._send(
+            fmt.outcome_card(signal), respect_quiet=True, to_owner=owner
+        )
 
     async def send_daily_report(self) -> None:
-        if not config.get("daily_report"):
-            return
-
+        """Сводка у каждого своя — по его сигналам."""
         import time
 
         since = int(time.time()) - 86400
-        data = await repo.stats(since=since)
-        signals_today = await repo.list_signals(limit=50, since=since)
-        if not signals_today and not data["decided"]:
-            log.info("Сводка не отправлена: за сутки не было активности")
-            return
-        await self._send(fmt.daily_report(data, signals_today))
+        for owner_id in settings.owner_id_list:
+            if not config.get("daily_report", user_id=owner_id):
+                continue
+            data = await repo.stats(since=since, owner_id=owner_id)
+            signals_today = await repo.list_signals(
+                limit=50, since=since, owner_id=owner_id
+            )
+            if not signals_today and not data["decided"]:
+                continue
+            await self._send(
+                fmt.daily_report(data, signals_today), to_owner=owner_id
+            )
 
     async def send_test(self) -> dict:
         """Отправляет всем получателям образец сигнала.
@@ -117,16 +138,21 @@ class Notifier:
         """
         from app.market.feed import feed
 
-        symbols = list(config.get("symbols") or [])
-        symbol = symbols[0] if symbols else "XAU/USDT:USDT"
-        price = await feed.fetch_price(symbol)
-        if price is None:
-            price = 1.0
+        report = {"symbol": "", "price": 0.0, "sent": [], "failed": []}
 
-        text = fmt.test_signal_card(symbol, price, feed.is_binary(symbol))
-
-        report = {"symbol": symbol, "price": price, "sent": [], "failed": []}
         for chat_id in settings.owner_id_list:
+            cfg = config.view(chat_id)
+            symbols = list(cfg.get("symbols") or [])
+            symbol = symbols[0] if symbols else "XAU/USDT:USDT"
+            price = await feed.fetch_price(symbol)
+            if price is None:
+                price = 1.0
+            if not report["symbol"]:
+                report["symbol"], report["price"] = symbol, price
+
+            text = fmt.test_signal_card(
+                symbol, price, feed.is_binary(symbol), cfg=cfg
+            )
             try:
                 await self.bot.send_message(
                     chat_id, text, disable_web_page_preview=True
@@ -146,16 +172,33 @@ class Notifier:
         return report
 
     async def send_startup(self) -> None:
-        """Сообщение о том, что бот поднялся — заметно, если он падал."""
-        symbols = ", ".join(fmt.short_symbol(s) for s in (config.get("symbols") or []))
-        text = (
-            "🚀 <b>Бот запущен</b>\n\n"
-            f"Инструменты: <b>{symbols}</b>\n"
-            f"Таймфрейм: <b>{config.get('timeframe')}</b> "
-            f"(тренд по {config.get('htf_timeframe')})\n"
-            f"Порог уверенности: <b>{config.get('min_confidence')}%</b>"
-        )
-        await self._send(text, kb.main_menu())
+        """Сообщение о запуске — каждому со своими настройками."""
+        for owner_id in settings.owner_id_list:
+            cfg = config.view(owner_id)
+            symbols = ", ".join(
+                fmt.short_symbol(s) for s in (cfg.get("symbols") or [])
+            )
+            text = (
+                "🚀 <b>Бот запущен и следит за рынком</b>\n\n"
+                f"Слежу за: <b>{symbols or 'ничего не выбрано'}</b>\n"
+                f"Свечи по <b>{cfg.get('timeframe')}</b>, "
+                f"общая картина по <b>{cfg.get('htf_timeframe')}</b>"
+            )
+            await self._send(text, kb.main_menu(), to_owner=owner_id)
 
     async def send_alert(self, message: str) -> None:
         await self._send(f"⚠️ <b>Внимание</b>\n\n{message}")
+
+    async def send_price_alert(self, alert: repo.Alert, price: float) -> None:
+        """Цена дошла до уровня, который человек заказал сам.
+
+        Режим «не беспокоить» здесь не действует: человек назвал уровень
+        и ждёт сообщения именно в этот момент. Не хочет ночных звонков —
+        не заказывает ночной уровень.
+        """
+        snapshot = await fmt.market_snapshot(alert.symbol)
+        await self._send(
+            fmt.alert_card(alert, price, snapshot),
+            kb.alert_actions(alert.id),
+            to_owner=alert.owner_id,
+        )

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -105,6 +106,18 @@ def amount(value: float | None) -> str:
     return f"{value:,.2f}".replace(",", " ")
 
 
+def _cfg_for(signal: repo.Signal):
+    """Настройки владельца сигнала.
+
+    Депозит и допустимый риск у каждого свои, поэтому объём позиции нельзя
+    считать по общим значениям. У старых сигналов владельца нет — для них
+    берём общие настройки.
+    """
+    if getattr(signal, "owner_id", None):
+        return config.view(signal.owner_id)
+    return config
+
+
 # --------------------------------------------------------------------------
 # Сигналы
 # --------------------------------------------------------------------------
@@ -118,8 +131,9 @@ def position_sizing(signal: repo.Signal) -> dict | None:
     Считается от расстояния до стопа, а не от цены входа, потому что
     рискуем мы именно этим расстоянием.
     """
-    deposit = float(config.get("deposit") or 0)
-    risk_pct = float(config.get("risk_per_trade") or 0)
+    cfg = _cfg_for(signal)
+    deposit = float(cfg.get("deposit") or 0)
+    risk_pct = float(cfg.get("risk_per_trade") or 0)
     distance = abs(signal.entry - signal.stop_loss)
     if deposit <= 0 or risk_pct <= 0 or distance <= 0:
         return None
@@ -264,20 +278,24 @@ def binary_signal_card(signal: repo.Signal) -> str:
 
 def binary_stake(signal: repo.Signal) -> str | None:
     """Размер ставки по опциону: процент депозита, заданный заказчиком."""
-    deposit = float(config.get("deposit") or 0)
-    risk_pct = float(config.get("risk_per_trade") or 0)
+    cfg = _cfg_for(signal)
+    deposit = float(cfg.get("deposit") or 0)
+    risk_pct = float(cfg.get("risk_per_trade") or 0)
     if deposit <= 0 or risk_pct <= 0:
         return None
     stake = deposit * risk_pct / 100
     return f"{amount(stake)} ({risk_pct:g}% от {amount(deposit)})"
 
 
-def test_signal_card(symbol: str, price: float, is_binary: bool = False) -> str:
+def test_signal_card(
+    symbol: str, price: float, is_binary: bool = False, cfg=None
+) -> str:
     """Карточка-образец по текущей цене.
 
     Выглядит как настоящий сигнал, но с явной пометкой, чтобы никто
     не принял её за рекомендацию. В журнал не записывается.
     """
+    cfg = cfg or config
     header = [
         "🧪 <b>ТЕСТОВОЕ СООБЩЕНИЕ</b>",
         "<i>Это проверка доставки, а не сигнал. "
@@ -292,7 +310,7 @@ def test_signal_card(symbol: str, price: float, is_binary: bool = False) -> str:
     now = int(datetime.now(tz=timezone.utc).timestamp())
     if is_binary:
         sample = repo.Signal(
-            id=0, symbol=symbol, side="LONG", timeframe=config.get("timeframe"),
+            id=0, symbol=symbol, side="LONG", timeframe=cfg.get("timeframe"),
             entry=price, stop_loss=price, take_profit=price, confidence=74,
             reasons=[
                 "EMA9 пересекла EMA21 снизу вверх",
@@ -301,16 +319,16 @@ def test_signal_card(symbol: str, price: float, is_binary: bool = False) -> str:
             ],
             indicators={"rsi": 58.0, "adx": 24.0},
             status=repo.ACTIVE, created_at=now, kind="binary", broker="po",
-            expiry_at=now + int(config.get("po_expiry_min") or 5) * 60,
+            expiry_at=now + int(cfg.get("po_expiry_min") or 5) * 60,
             payout=92.0,
         )
     else:
         atr = price * 0.0015
-        risk = atr * float(config.get("atr_sl_mult") or 1.5)
+        risk = atr * float(cfg.get("atr_sl_mult") or 1.5)
         sample = repo.Signal(
-            id=0, symbol=symbol, side="LONG", timeframe=config.get("timeframe"),
+            id=0, symbol=symbol, side="LONG", timeframe=cfg.get("timeframe"),
             entry=price, stop_loss=price - risk,
-            take_profit=price + risk * float(config.get("risk_reward") or 1.8),
+            take_profit=price + risk * float(cfg.get("risk_reward") or 1.8),
             confidence=74,
             reasons=[
                 "EMA9 пересекла EMA21 снизу вверх",
@@ -599,8 +617,44 @@ def news_card(events: list[NewsEvent], muted_by: NewsEvent | None) -> str:
     return "\n".join(lines)
 
 
-def settings_card(values: dict | None = None) -> str:
-    """Показывает текущие настройки, сгруппированные как в приложении."""
+def presets_card(current: str | None) -> str:
+    """Экран выбора режима работы."""
+    from app.storage.settings_store import PRESETS
+
+    lines = [
+        "🎚 <b>Режим работы</b>",
+        "",
+        "Это готовый набор настроек под одну цель. Нажмите — и все "
+        "значения выставятся сами. Отдельные из них потом можно "
+        "поправить вручную.",
+        "",
+    ]
+    for preset in PRESETS:
+        mark = " — <b>включён сейчас</b>" if current == preset.key else ""
+        lines += [
+            f"{preset.emoji} <b>{preset.name}</b>{mark}",
+            f"{preset.summary}.",
+            f"<i>{preset.detail}</i>",
+            f"Ожидайте: <b>{preset.expect}</b>.",
+            "",
+        ]
+
+    if current is None:
+        lines.append(
+            "<i>Сейчас работают ваши собственные значения — ни один "
+            "готовый режим им не соответствует. Это нормально: "
+            "выбирайте режим, только если хотите начать заново.</i>"
+        )
+    return "\n".join(lines)
+
+
+def settings_card(values: dict | None = None, summary=None) -> str:
+    """Показывает текущие настройки, сгруппированные как в приложении.
+
+    Перед списком параметров идёт описание обычными словами: человеку
+    важнее понять, что бот делает, чем прочитать сорок строк со
+    значениями.
+    """
     values = values if values is not None else config.all()
 
     def render(value, kind: str, unit: str) -> str:
@@ -612,6 +666,10 @@ def settings_card(values: dict | None = None) -> str:
         return f"{text} {unit}".strip() if unit else (text or "—")
 
     lines = ["⚙️ <b>Настройки</b>", ""]
+    if summary:
+        lines.append("<b>Что происходит сейчас</b>")
+        lines += [f"• {line}" for line in summary]
+        lines.append("")
     for group_key, group_label in GROUPS.items():
         group_fields = [f for f in FIELDS if f.group == group_key and not f.advanced]
         if not group_fields:
@@ -623,8 +681,10 @@ def settings_card(values: dict | None = None) -> str:
         lines.append("")
 
     lines.append(
-        "<i>Меняются кнопками ниже или в приложении. "
-        "Применяются сразу, перезапуск не нужен.</i>"
+        "<i>Не знаете, что выставить, — нажмите «Выбрать режим работы»: "
+        "всё настроится одним нажатием. Отдельные значения удобнее "
+        "менять в приложении, там у каждой строки есть пояснение. "
+        "Применяется сразу, перезапуск не нужен.</i>"
     )
     return "\n".join(lines)
 
@@ -676,3 +736,157 @@ def help_card() -> str:
             "Он только присылает информацию — все решения ваши.</i>",
         ]
     )
+
+
+# --------------------------------------------------------------------------
+# Уведомления по цене
+# --------------------------------------------------------------------------
+
+
+async def market_snapshot(symbol: str) -> dict:
+    """Короткая сводка по инструменту: что с ценой за сутки.
+
+    Нужна, чтобы уведомление не состояло из одного числа. Человек,
+    которому написали «дошло до 95 000», сразу хочет знать: это рывок
+    или оно тут весь день топчется.
+    """
+    from app.market.feed import feed
+
+    out: dict = {}
+    try:
+        candles = await feed.fetch_candles(symbol, "1h", limit=25)
+    except Exception:
+        return out
+    if len(candles) < 2:
+        return out
+
+    closes = candles.closes
+    highs = candles.highs
+    lows = candles.lows
+    out["day_open"] = closes[0]
+    out["day_high"] = max(highs)
+    out["day_low"] = min(lows)
+    out["last"] = closes[-1]
+    if closes[0]:
+        out["day_change_pct"] = (closes[-1] - closes[0]) / closes[0] * 100
+
+    # Где сейчас цена внутри суточного размаха: 0% — на дне, 100% — на пике
+    span = out["day_high"] - out["day_low"]
+    if span > 0:
+        out["day_position"] = (closes[-1] - out["day_low"]) / span * 100
+    return out
+
+
+def _waited(seconds: int) -> str:
+    """Сколько уведомление прождало своего часа."""
+    if seconds < 90:
+        return "меньше минуты"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours = minutes // 60
+    if hours < 24:
+        rest = minutes % 60
+        return f"{hours} ч" + (f" {rest} мин" if rest else "")
+    days = hours // 24
+    return f"{days} дн" + (f" {hours % 24} ч" if hours % 24 else "")
+
+
+def alert_card(alert: repo.Alert, price: float, snapshot: dict | None = None) -> str:
+    """Сообщение о том, что цена дошла до заказанного уровня."""
+    snapshot = snapshot or {}
+    name = short_symbol(alert.symbol)
+    side = "поднялся до" if alert.direction == repo.UP else "опустился до"
+
+    lines = [
+        f"🔔 <b>{name} {side} {money(alert.price)}</b>",
+        "",
+        f"Сейчас: <b>{money(price)}</b>",
+    ]
+
+    if alert.start_price:
+        delta = price - alert.start_price
+        delta_pct = delta / alert.start_price * 100 if alert.start_price else 0
+        arrow = "▲" if delta >= 0 else "▼"
+        lines.append(
+            f"С момента заказа: {arrow} {money(abs(delta))} "
+            f"({pct(delta_pct, True)}) — было {money(alert.start_price)}"
+        )
+
+    if "day_change_pct" in snapshot:
+        change = snapshot["day_change_pct"]
+        mood = "растёт" if change > 0.15 else ("падает" if change < -0.15 else "стоит на месте")
+        lines.append(f"За сутки {mood}: {pct(change, True)}")
+
+    if "day_high" in snapshot and "day_low" in snapshot:
+        lines.append(
+            f"Размах за сутки: {money(snapshot['day_low'])} — "
+            f"{money(snapshot['day_high'])}"
+        )
+        position = snapshot.get("day_position")
+        if position is not None:
+            if position >= 80:
+                where = "у самого верха дневного диапазона"
+            elif position <= 20:
+                where = "у самого низа дневного диапазона"
+            else:
+                where = "в середине дневного диапазона"
+            lines.append(f"Цена {where}")
+
+    waited = int(time.time()) - alert.created_at
+    lines += [
+        "",
+        f"⏱ Уведомление ждало {_waited(waited)} — вы заказали его "
+        f"{local_time(alert.created_at, True)}.",
+    ]
+    if alert.note:
+        lines.append(f"📝 Ваша заметка: <i>{alert.note}</i>")
+
+    lines += [
+        "",
+        "<i>Это не сигнал на сделку: бот просто сообщил о цене, "
+        "о которой вы просили. Решение — за вами.</i>",
+    ]
+    if alert.repeat:
+        lines.append(
+            "<i>Уведомление повторяющееся: сообщу снова, когда цена "
+            "вернётся к этому уровню с другой стороны.</i>"
+        )
+    return "\n".join(lines)
+
+
+def alerts_list_card(alerts: list[repo.Alert], prices: dict | None = None) -> str:
+    """Список заказанных уровней."""
+    prices = prices or {}
+    if not alerts:
+        return (
+            "🔔 <b>Уведомления по цене</b>\n\n"
+            "Пока ни одного. Это простая вещь: вы называете цену — "
+            "бот пишет, когда рынок до неё дошёл.\n\n"
+            "Просто отправьте сообщение вида:\n"
+            "<code>биткоин 95000</code>\n"
+            "<code>золото 4400</code>\n"
+            "<code>BTC 95000 продать половину</code>\n\n"
+            "Последнее слово после цены — заметка для себя, "
+            "она вернётся вместе с уведомлением."
+        )
+
+    lines = ["🔔 <b>Уведомления по цене</b>", ""]
+    for alert in alerts:
+        name = short_symbol(alert.symbol)
+        now = prices.get(alert.symbol)
+        arrow = "выше" if alert.direction == repo.UP else "ниже"
+        line = f"• <b>{name}</b> — сообщить при {money(alert.price)} ({arrow})"
+        if now:
+            distance = abs(now - alert.price) / now * 100 if now else 0
+            line += f"\n  сейчас {money(now)}, осталось {distance:.2f}%"
+        if alert.note:
+            line += f"\n  📝 {alert.note}"
+        lines.append(line)
+
+    lines += [
+        "",
+        "<i>Чтобы добавить ещё — отправьте сообщение вида "
+        "«биткоин 95000». Чтобы убрать — кнопкой ниже.</i>",
+    ]
+    return "\n".join(lines)
