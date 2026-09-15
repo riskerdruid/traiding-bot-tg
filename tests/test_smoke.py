@@ -685,7 +685,8 @@ async def test_brokers_and_binary() -> None:
     check("определяется демо-счёт", "демо" in why, why)
 
     ok, why = validate_ssid(real)
-    check("определяется реальный счёт", ok and "реальный" in why, why)
+    check("определяется реальный счёт", ok and "реальн" in why.lower(), why[:70])
+    check("реальный счёт отмечен заметно", "РЕАЛЬНЫЙ" in why, why[:70])
 
     check("пустая строка отклоняется", not validate_ssid("")[0])
     check("обрывок отклоняется", not validate_ssid('{"session":"x"}')[0])

@@ -118,8 +118,16 @@ def validate_ssid(raw: str) -> tuple[bool, str]:
     if not session:
         return False, "Поле session пустое — сессия не годится."
 
-    account = "демо-счёт" if payload.get("isDemo") else "реальный счёт"
-    return True, f"Похоже на рабочий SSID, {account}."
+    if payload.get("isDemo"):
+        return True, "Похоже на рабочий SSID, демо-счёт."
+
+    # Реальный счёт — отмечаем явно. Бот не торгует, но человек должен
+    # понимать, к какому счёту он подключается.
+    return True, (
+        "Похоже на рабочий SSID, РЕАЛЬНЫЙ счёт. Бот только читает котировки "
+        "и не совершает сделок, но для оценки качества сигналов надёжнее "
+        "начать с демо."
+    )
 
 
 class PocketOptionBroker(BrokerAdapter):
