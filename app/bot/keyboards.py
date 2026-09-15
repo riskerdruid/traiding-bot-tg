@@ -53,6 +53,7 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="ℹ️ Статус", callback_data="nav:status"),
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="nav:settings"),
             ],
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="nav:help")],
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -126,11 +127,47 @@ def signal_actions(signal_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def help_menu() -> InlineKeyboardMarkup:
+    """Список тем справки — по две в ряд, чтобы влезли заголовки."""
+    from app import help as help_content
+
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for topic in help_content.topic_list():
+        pair.append(
+            InlineKeyboardButton(
+                text=f"{topic['icon']} {topic['title']}",
+                callback_data=f"help:{topic['id']}",
+            )
+        )
+        if len(pair) == 1:  # заголовки длинные, кладём по одной в ряд
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+
+    webapp = _webapp_button("📱 Открыть приложение")
+    if webapp:
+        rows.append([webapp])
+    rows.append([InlineKeyboardButton(text="‹ Меню", callback_data="nav:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def help_topic() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="‹ Все темы", callback_data="nav:help")],
+            [InlineKeyboardButton(text="Меню", callback_data="nav:menu")],
+        ]
+    )
+
+
 def persistent_menu() -> ReplyKeyboardMarkup:
     """Нижняя клавиатура — быстрый доступ без прокрутки истории чата."""
     rows = [
         [KeyboardButton(text="🎯 Сигналы"), KeyboardButton(text="📊 Статистика")],
         [KeyboardButton(text="📰 Новости"), KeyboardButton(text="ℹ️ Статус")],
+        [KeyboardButton(text="❓ Помощь")],
     ]
     if settings.webapp_enabled:
         rows.insert(

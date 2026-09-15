@@ -28,6 +28,9 @@
     pending: {},
     symbolBroker: 'ex',
     brokers: [],
+    help: null,
+    helpOpen: null,
+    prevScreen: 'overview',
   };
 
   const SCREEN_TITLES = {
@@ -35,6 +38,7 @@
     signals: 'Сигналы',
     stats: 'Статистика',
     settings: 'Настройки',
+    help: 'Помощь',
   };
 
   const STATUS_VIEW_BINARY = {
@@ -822,6 +826,71 @@
     return html + '</div>';
   }
 
+  /* ------------------------------------------------------ Экран помощи */
+
+  function renderHelpBlock(block) {
+    if (block.type === 'text') return '<p class="help-text">' + block.text + '</p>';
+    if (block.type === 'note') return '<div class="help-note">💡 ' + block.text + '</div>';
+    if (block.type === 'warn') return '<div class="help-warn">⚠️ ' + block.text + '</div>';
+    if (block.type === 'code') {
+      return '<pre class="help-code">' + escapeHtml(block.text) + '</pre>';
+    }
+    if (block.type === 'steps') {
+      return '<ol class="help-steps">'
+        + block.items.map(function (i) { return '<li>' + i + '</li>'; }).join('')
+        + '</ol>';
+    }
+    if (block.type === 'list') {
+      return '<ul class="help-list">'
+        + block.items.map(function (i) { return '<li>' + i + '</li>'; }).join('')
+        + '</ul>';
+    }
+    return '';
+  }
+
+  function renderHelp(topics) {
+    let html = '<div class="screen">';
+    html += '<div class="note" style="margin-bottom:14px">'
+      + 'Та же справка есть в боте: команда /help. Нажмите на тему, чтобы раскрыть.'
+      + '</div>';
+
+    topics.forEach(function (topic) {
+      const open = state.helpOpen === topic.id;
+      html += '<div class="help-card' + (open ? ' open' : '') + '" data-topic="'
+        + escapeHtml(topic.id) + '">'
+        + '<button class="help-head">'
+        + '<span class="help-icon">' + topic.icon + '</span>'
+        + '<span class="help-title"><b>' + escapeHtml(topic.title) + '</b>'
+        + '<span class="help-summary">' + escapeHtml(topic.summary) + '</span></span>'
+        + '<span class="help-chev">' + (open ? '−' : '+') + '</span>'
+        + '</button>';
+      if (open) {
+        html += '<div class="help-body">'
+          + topic.blocks.map(renderHelpBlock).join('') + '</div>';
+      }
+      html += '</div>';
+    });
+
+    return html + '</div>';
+  }
+
+  function bindHelp() {
+    document.querySelectorAll('[data-topic] .help-head').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const card = btn.closest('[data-topic]');
+        const id = card.dataset.topic;
+        state.helpOpen = state.helpOpen === id ? null : id;
+        haptic('select');
+        content.innerHTML = renderHelp(state.help || []);
+        bindHelp();
+        if (state.helpOpen === id) {
+          const target = document.querySelector('[data-topic="' + id + '"]');
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
+  }
+
   /* --------------------------------------------- Сохранение настроек */
 
   async function saveField(key, value) {
@@ -858,18 +927,37 @@
         list.innerHTML = '<div class="empty"><div class="empty-text">Ничего не найдено</div></div>';
         return;
       }
+      // У биржи несколько инструментов могут свернуться в одно имя
+      // (своп и срочные фьючерсы на золото — все «XAU/USD»). Там, где
+      // метки совпадают, показываем полный символ, иначе выбрать нужный
+      // невозможно.
+      const labels = {};
+      data.items.forEach(function (item) {
+        const l = shortSymbol(item.symbol);
+        labels[l] = (labels[l] || 0) + 1;
+      });
+
       list.innerHTML = data.items.map(function (item) {
+        const label = shortSymbol(item.symbol);
+        const ambiguous = labels[label] > 1;
         const tags = [];
+
         if (item.is_otc) tags.push('<span class="tag otc">OTC</span>');
         if (item.payout != null) {
           const good = item.payout >= 80;
           tags.push('<span class="tag' + (good ? ' pay-good' : '') + '">'
             + Math.round(item.payout) + '%</span>');
         }
+        const typeLabel = { swap: 'бессрочный', future: 'срочный', spot: 'спот',
+                            option: 'опцион', margin: 'маржа' }[item.asset_type];
+        if (typeLabel) tags.push('<span class="tag">' + typeLabel + '</span>');
+
         return '<button class="sym-row' + (item.selected ? ' selected' : '') + '" '
           + 'data-symbol="' + escapeHtml(item.symbol) + '">'
-          + '<span class="sym-name">' + escapeHtml(shortSymbol(item.symbol))
-          + (tags.length ? ' ' + tags.join(' ') : '') + '</span>'
+          + '<span class="sym-name"><b>' + escapeHtml(label) + '</b>'
+          + (tags.length ? ' ' + tags.join(' ') : '')
+          + (ambiguous ? '<span class="sym-full">' + escapeHtml(item.symbol) + '</span>' : '')
+          + '</span>'
           + '<span class="dim" style="font-size:11px">'
           + (item.selected ? 'выбран ✓' : 'добавить') + '</span></button>';
       }).join('');
@@ -981,6 +1069,13 @@
         state.stats.data = data;
         content.innerHTML = renderStats(data, state.stats.period);
         bindFilters('data-period', function (v) { state.stats.period = v; loadScreen('stats'); });
+      } else if (screen === 'help') {
+        if (!state.help) {
+          const data = await api('/api/help');
+          state.help = data.topics || [];
+        }
+        content.innerHTML = renderHelp(state.help);
+        bindHelp();
       } else if (screen === 'settings') {
         const [cfg, news, brokers] = await Promise.all([
           api('/api/config'), api('/api/news'),
@@ -1136,6 +1231,24 @@
 
   document.querySelectorAll('.tab').forEach(function (tab) {
     tab.addEventListener('click', function () { switchScreen(tab.dataset.screen); });
+  });
+
+  document.getElementById('help-btn').addEventListener('click', function () {
+    haptic('select');
+    if (state.screen === 'help') {
+      // Повторное нажатие возвращает туда, откуда пришли
+      const back = state.prevScreen || 'overview';
+      state.screen = null;
+      switchScreen(back);
+      return;
+    }
+    state.prevScreen = state.screen;
+    state.screen = 'help';
+    document.getElementById('screen-title').textContent = SCREEN_TITLES.help;
+    document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+    window.scrollTo({ top: 0 });
+    if (state.autoTimer) clearInterval(state.autoTimer);
+    loadScreen('help');
   });
 
   document.getElementById('refresh-btn').addEventListener('click', function () {

@@ -16,6 +16,7 @@ from app.config import settings
 from app.market.feed import feed
 from app.news.calendar import calendar
 from app.storage import repo
+from app import help as help_content
 from app.storage.settings_store import config
 
 log = logging.getLogger("bot.handlers")
@@ -174,8 +175,24 @@ async def cmd_start(message: Message) -> None:
 
 
 @router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message) -> None:
-    await message.answer(fmt.help_card(), reply_markup=kb.main_menu())
+    await message.answer(fmt.help_menu(), reply_markup=kb.help_menu())
+
+
+@router.callback_query(F.data == "nav:help")
+async def nav_help(call: CallbackQuery) -> None:
+    await _render(call, fmt.help_menu(), kb.help_menu())
+
+
+@router.callback_query(F.data.startswith("help:"))
+async def show_help_topic(call: CallbackQuery) -> None:
+    topic_id = call.data.split(":", 1)[1]
+    text = help_content.render_topic_text(topic_id)
+    if text is None:
+        await call.answer("Тема не найдена", show_alert=True)
+        return
+    await _render(call, text, kb.help_topic())
 
 
 @router.message(Command("signals"))

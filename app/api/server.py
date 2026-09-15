@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import help as help_content
 from app.api.auth import require_owner
 from app.bot.formatters import position_sizing
 from app.config import settings
@@ -26,6 +27,13 @@ from app.storage.settings_store import GROUPS, ValidationError, config
 log = logging.getLogger("api.server")
 
 WEBAPP_DIR = Path(__file__).parent / "webapp"
+
+# Ходовые активы показываются первыми, пока поиск пуст: биржа отдаёт
+# тысячи пар, и без этого список начинается со случайных тикеров.
+MAJORS = [
+    "XAU", "XAG", "BTC", "ETH", "SOL", "XRP", "BNB", "DOGE",
+    "ADA", "TON", "AVAX", "LINK", "TRX", "DOT", "MATIC", "LTC",
+]
 
 PERIOD_WINDOWS = {
     "day": 86400,
@@ -313,8 +321,17 @@ def create_app() -> FastAPI:
             if broker == "po":
                 # Сначала OTC (работают в выходные) и с высокой выплатой
                 return (0 if a.is_otc else 1, -(a.payout or 0), a.symbol)
-            # На бирже вперёд бессрочные фьючерсы к USDT
-            return (0 if a.symbol.endswith(":USDT") else 1, len(a.symbol), a.symbol)
+
+            # На бирже вперёд ходовые активы, затем бессрочные фьючерсы.
+            # Сортировать по длине имени нельзя: наверх всплывают
+            # односимвольные тикеры вроде A/USDT, которые никому не нужны.
+            base = a.symbol.split("/")[0].upper()
+            popularity = MAJORS.index(base) if base in MAJORS else len(MAJORS)
+            return (
+                popularity,
+                0 if a.symbol.endswith(":USDT") else 1,
+                a.symbol,
+            )
 
         matched = sorted(matched, key=rank)[:limit]
         return {
@@ -325,6 +342,11 @@ def create_app() -> FastAPI:
             "total_available": len(available),
             "selected": selected,
         }
+
+    @app.get("/api/help")
+    async def help_topics(_: dict = Depends(require_owner)) -> dict:
+        """Справка. Тексты общие с ботом — см. app/help.py."""
+        return {"topics": help_content.TOPICS}
 
     @app.get("/api/events")
     async def events(

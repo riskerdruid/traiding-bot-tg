@@ -421,6 +421,31 @@ async def test_api() -> None:
         r = client.post("/api/config", json={})
         check("пустой запрос -> 400", r.status_code == 400)
 
+        r = client.get("/api/help")
+        check("/api/help отвечает", r.status_code == 200)
+        topics = r.json()["topics"]
+        check("тем в справке не меньше 8", len(topics) >= 8, f"={len(topics)}")
+        check(
+            "у темы есть все поля",
+            all(
+                {"id", "icon", "title", "summary", "blocks"} <= set(t)
+                for t in topics
+            ),
+        )
+        check("есть тема про SSID", any(t["id"] == "ssid" for t in topics))
+        ssid_topic = [t for t in topics if t["id"] == "ssid"][0]
+        check("в теме SSID есть пошаговая инструкция",
+              any(b["type"] == "steps" for b in ssid_topic["blocks"]))
+        check("в теме SSID есть пример строки",
+              any(b["type"] == "code" for b in ssid_topic["blocks"]))
+        check(
+            "блоки известных типов",
+            all(
+                b["type"] in ("text", "steps", "list", "note", "warn", "code")
+                for t in topics for b in t["blocks"]
+            ),
+        )
+
         r = client.get("/api/events")
         check("/api/events отвечает", r.status_code == 200)
 

@@ -566,6 +566,23 @@ def settings_card(values: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def help_menu() -> str:
+    """Стартовый экран справки со списком тем."""
+    from app import help as help_content
+
+    lines = [
+        "❓ <b>Помощь</b>",
+        "",
+        "Выберите тему — или откройте приложение, там та же справка "
+        "с оглавлением и поиском.",
+        "",
+    ]
+    for topic in help_content.topic_list():
+        lines.append(f"{topic['icon']} <b>{topic['title']}</b>")
+        lines.append(f"    <i>{topic['summary']}</i>")
+    return "\n".join(lines)
+
+
 def help_card() -> str:
     return "\n".join(
         [
