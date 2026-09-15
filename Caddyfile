@@ -1,0 +1,41 @@
+# Автоматический HTTPS для Mini App.
+#
+# Caddy сам получает и продлевает сертификат Let's Encrypt — ни certbot,
+# ни cron, ни ручного обновления не нужно. Домен берётся из переменной
+# DOMAIN в .env.
+#
+# Требования: на сервере открыты порты 80 и 443, а A-запись домена
+# указывает на IP этого сервера.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# frame-ancestors здесь НЕ ставится намеренно: Telegram открывает
+	# Mini App в родном webview, источник родителя там не web.telegram.org,
+	# и любой белый список ломает приложение. Защита — на подписи initData.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Статика Mini App кешируется, API — никогда
+	@static path /static/*
+	header @static Cache-Control "public, max-age=3600"
+
+	@api path /api/*
+	header @api Cache-Control "no-store"
+
+	reverse_proxy bot:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+		format json
+	}
+}

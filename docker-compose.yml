@@ -1,0 +1,58 @@
+services:
+  bot:
+    build: .
+    # Имя образа задано явно, чтобы можно было собрать его отдельной
+    # командой. На серверах, где firewall не пускает сборочную сеть
+    # к DNS, собирайте так:  docker build --network=host -t trading-signals-bot .
+    image: trading-signals-bot:latest
+    container_name: trading-signals-bot
+    restart: unless-stopped
+    env_file: .env
+    # Куда публиковать порт приложения.
+    #   0.0.0.0        — чистый VPS, HTTPS даёт Caddy из профиля ниже
+    #   192.168.1.1    — за существующим реверс-прокси: наружу порт не светится
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${BIND_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data      # журнал сигналов и настройки переживают пересборку
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Нужен ТОЛЬКО если на сервере нет своего реверс-прокси.
+  # Запуск:  docker compose --profile caddy up -d
+  # Если 80/443 уже заняты nginx — не включайте, вместо этого добавьте
+  # vhost к существующему прокси (см. deploy/nginx-vhost.conf).
+  caddy:
+    image: caddy:2-alpine
+    container_name: trading-signals-caddy
+    restart: unless-stopped
+    profiles: ["caddy"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?укажите DOMAIN в .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # сертификаты: не удалять, иначе перевыпуск
+      - caddy_config:/config
+      - ./logs/caddy:/var/log/caddy
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    # Подсеть зафиксирована намеренно: на серверах, где исходящий трафик
+    # заворачивается в VPN по адресу источника, правило firewall ссылается
+    # именно на неё. Плавающая подсеть ломала бы это правило при пересоздании.
+    ipam:
+      config:
+        - subnet: ${BOT_SUBNET:-172.28.0.0/16}
