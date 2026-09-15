@@ -39,6 +39,15 @@ say "2/5  Связываю каталог с репозиторием"
 
 cd "$APP_DIR"
 
+# Каталог, скопированный с рабочей машины по scp, приезжает с чужим
+# владельцем — git такому каталогу не доверяет и отказывается работать.
+# Служба ходит сюда от root, поэтому владельцем должен быть root.
+if [ "$(stat -c %u .)" != "0" ]; then
+  chown -R root:root .
+  ok "владелец каталога исправлен на root"
+fi
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+
 if [ -d .git ]; then
   git remote set-url origin "$REPO"
   ok "репозиторий уже подключён"
