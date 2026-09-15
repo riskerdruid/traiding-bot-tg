@@ -208,6 +208,45 @@ async def test_tracker_logic() -> None:
     )
 
 
+async def test_warmup_fits_brokers() -> None:
+    """Прогрев стратегии должен укладываться в историю, которую дают площадки.
+
+    Брокер опционов отдаёт около 150 свечей. Если стратегия требует больше,
+    сигналы по опционам не появятся НИКОГДА, и это не видно в логах —
+    инструмент просто молча пропускается.
+    """
+    print("Прогрев против глубины истории площадок")
+    from app.storage.settings_store import config as cfg
+
+    await cfg.load()
+    needed = strategy.min_candles()
+    check(
+        "прогрев укладывается в 150 свечей брокера опционов",
+        needed <= 150,
+        f"нужно {needed}",
+    )
+    check("прогрев не выродился в ноль", needed >= 50, f"={needed}")
+
+    # Порог не должен зависеть от длинной EMA: она считается только
+    # на старшем графике, и там есть запасной путь
+    await cfg.set("ema_trend_slow", 400)
+    check(
+        "длинная EMA старшего ТФ не влияет на прогрев",
+        strategy.min_candles() == needed,
+        f"стало {strategy.min_candles()}",
+    )
+    await cfg.reset("ema_trend_slow")
+
+    # А вот EMA тренда влияет — она считается на рабочем таймфрейме
+    await cfg.set("ema_trend", 120)
+    check(
+        "EMA тренда увеличивает прогрев",
+        strategy.min_candles() > needed,
+        f"={strategy.min_candles()}",
+    )
+    await cfg.reset("ema_trend")
+
+
 def test_strategy_offline() -> None:
     print("Стратегия на синтетических данных")
 
@@ -816,6 +855,8 @@ async def main() -> int:
         await test_position_sizing()
         print()
         await test_brokers_and_binary()
+        print()
+        await test_warmup_fits_brokers()
         print()
         test_strategy_offline()
         print()

@@ -58,16 +58,31 @@ class Scanner:
             return []
 
         if missing:
-            log.warning(
-                "Эти инструменты не найдены на бирже %s и будут пропущены: %s",
-                settings.exchange,
-                ", ".join(missing),
-            )
-            await repo.log_event(
-                "warning",
-                f"Инструменты недоступны на {settings.exchange}: {', '.join(missing)}",
-                {"missing": missing},
-            )
+            # Сообщение должно называть ту площадку, к которой относится
+            # инструмент, иначе пара брокера выглядит как «не найдена на бирже»
+            by_place: dict[str, list[str]] = {}
+            for full in missing:
+                prefix, _ = split_symbol(full)
+                place = (
+                    feed.pocket_broker.title
+                    if prefix == "po"
+                    else settings.exchange.upper()
+                )
+                by_place.setdefault(place, []).append(full)
+
+            for place, items in by_place.items():
+                reason = ""
+                if place == feed.pocket_broker.title and not feed.pocket_broker.configured:
+                    reason = " (не задан SSID)"
+                log.warning(
+                    "Недоступны на %s%s и будут пропущены: %s",
+                    place, reason, ", ".join(items),
+                )
+                await repo.log_event(
+                    "warning",
+                    f"Недоступны на {place}{reason}: {', '.join(items)}",
+                    {"missing": items, "place": place},
+                )
         if ok:
             log.info("В работе инструменты: %s", ", ".join(ok))
         self._active_symbols = ok
@@ -111,11 +126,18 @@ class Scanner:
         # Перечитываем настройки — заказчик мог поменять их из приложения
         # минуту назад, и они должны примениться без перезапуска.
         previous_symbols = list(config.get("symbols") or [])
+        previous_ssid = feed.pocket_broker.ssid
         await config.load()
         # SSID брокера мог измениться в приложении — подхватываем без перезапуска
         feed.apply_settings(pocket_ssid=str(config.get("po_ssid") or ""))
+
         if list(config.get("symbols") or []) != previous_symbols:
-            log.info("Список инструментов изменён, перепроверяю на бирже")
+            log.info("Список инструментов изменён, перепроверяю доступность")
+            self._active_symbols = []
+        elif feed.pocket_broker.ssid != previous_ssid:
+            # Без этого пары брокера, отвергнутые при старте из-за пустого
+            # SSID, так и оставались бы в списке недоступных навсегда
+            log.info("SSID брокера изменён, перепроверяю его инструменты")
             self._active_symbols = []
 
         await calendar.refresh()
