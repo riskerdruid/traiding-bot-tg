@@ -1,0 +1,21 @@
+[Unit]
+Description=Обновление торгового бота из git
+Documentation=https://github.com/riskerdruid/traiding-bot-tg
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/trading-bot/deploy/autodeploy.sh
+WorkingDirectory=/opt/trading-bot
+
+# Сборка образа и прогон тестов занимают минуты — обрывать нельзя,
+# иначе контейнер останется подменённым наполовину
+TimeoutStartSec=1800
+
+# Ошибка обновления — не повод считать службу сломанной: скрипт сам
+# откатывается и пишет об этом в Telegram, а таймер попробует снова
+SuccessExitStatus=0 1
+
+StandardOutput=journal
+StandardError=journal

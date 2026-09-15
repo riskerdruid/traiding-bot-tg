@@ -1,0 +1,23 @@
+[Unit]
+Description=Проверять git на новые версии бота
+Documentation=https://github.com/riskerdruid/traiding-bot-tg
+
+[Timer]
+# Первая проверка через минуту после загрузки сервера, дальше каждые две.
+# Две минуты — компромисс: разработчик почти сразу видит свою правку
+# на сервере, а обращений к GitHub при этом меньше тысячи в сутки.
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+# Небольшой разброс, чтобы проверки не били ровно в одну и ту же секунду
+RandomizedDelaySec=15s
+
+# Если сервер был выключен и пропустил срабатывание — проверить сразу
+# после включения, а не ждать следующего окна
+Persistent=true
+
+AccuracySec=10s
+Unit=trading-bot-deploy.service
+
+[Install]
+WantedBy=timers.target
