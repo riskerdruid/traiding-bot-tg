@@ -27,6 +27,7 @@ COMMANDS = [
     BotCommand(command="news", description="Экономический календарь"),
     BotCommand(command="status", description="Состояние бота"),
     BotCommand(command="settings", description="Уведомления"),
+    BotCommand(command="test", description="Проверить доставку сигналов"),
     BotCommand(command="help", description="Справка"),
 ]
 

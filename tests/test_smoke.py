@@ -322,7 +322,19 @@ async def test_formatters() -> None:
 
     stats = await repo.stats()
     card2 = fmt.stats_card(stats, "За всё время", await repo.stats_by_symbol())
-    check("карточка статистики не пуста", "Winrate" in card2)
+    check("карточка статистики не пуста", "Точность" in card2, card2[:80])
+
+    # Подписи должны быть понятны без трейдерского словаря
+    import re as _re
+
+    jargon = _re.compile(r"(winrate|ADX|ATR|EMA|RSI|MACD|профит-фактор)", _re.I)
+    from app.storage.settings_store import FIELDS as _FIELDS
+    from app.storage.settings_store import GROUPS as _GROUPS
+
+    bad_labels = [f.label for f in _FIELDS if jargon.search(f.label)]
+    check("в подписях настроек нет жаргона", not bad_labels, str(bad_labels))
+    bad_groups = [g for g in _GROUPS.values() if jargon.search(g)]
+    check("в названиях групп нет жаргона", not bad_groups, str(bad_groups))
     check("статистика: теги сбалансированы", card2.count("<b>") == card2.count("</b>"))
 
     check("список активных рендерится", len(fmt.active_list([active], {})) > 50)

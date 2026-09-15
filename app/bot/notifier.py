@@ -109,6 +109,42 @@ class Notifier:
             return
         await self._send(fmt.daily_report(data, signals_today))
 
+    async def send_test(self) -> dict:
+        """Отправляет всем получателям образец сигнала.
+
+        Возвращает отчёт: кому дошло, кому нет и почему. Нужен для ответа
+        на команду — иначе непонятно, сработало ли.
+        """
+        from app.market.feed import feed
+
+        symbols = list(config.get("symbols") or [])
+        symbol = symbols[0] if symbols else "XAU/USDT:USDT"
+        price = await feed.fetch_price(symbol)
+        if price is None:
+            price = 1.0
+
+        text = fmt.test_signal_card(symbol, price, feed.is_binary(symbol))
+
+        report = {"symbol": symbol, "price": price, "sent": [], "failed": []}
+        for chat_id in settings.owner_id_list:
+            try:
+                await self.bot.send_message(
+                    chat_id, text, disable_web_page_preview=True
+                )
+                report["sent"].append(chat_id)
+            except TelegramBadRequest as exc:
+                reason = (
+                    "не нажимал /start"
+                    if "chat not found" in str(exc).lower()
+                    else str(exc)[:60]
+                )
+                report["failed"].append((chat_id, reason))
+            except TelegramForbiddenError:
+                report["failed"].append((chat_id, "заблокировал бота"))
+            except Exception as exc:
+                report["failed"].append((chat_id, str(exc)[:60]))
+        return report
+
     async def send_startup(self) -> None:
         """Сообщение о том, что бот поднялся — заметно, если он падал."""
         symbols = ", ".join(fmt.short_symbol(s) for s in (config.get("symbols") or []))

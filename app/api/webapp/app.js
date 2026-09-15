@@ -239,15 +239,16 @@
         color = h.winrate >= 55 ? 'var(--green)' : (h.winrate >= 45 ? 'var(--amber)' : 'var(--red)');
       }
       const title = h.total
-        ? h.hour + ':00 — ' + h.wins + '/' + h.total + ' (' + h.winrate + '%)'
+        ? h.hour + ':00 — угадал ' + h.wins + ' из ' + h.total + ' (' + h.winrate + '%)'
         : h.hour + ':00 — сигналов не было';
       return '<div class="hour-col" title="' + escapeHtml(title) + '">'
         + '<div class="hour-bar" style="height:' + height + '%;background:' + color + '"></div></div>';
     }).join('');
     return '<div class="hours">' + columns + '</div>'
       + '<div class="hours-axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>'
-      + '<div class="note">Столбик — число сигналов в этот час по UTC. '
-      + 'Цвет — winrate: зелёный выше 55%, красный ниже 45%.</div>';
+      + '<div class="note">Высота столбика — сколько сигналов было в этот час. '
+      + 'Зелёный — чаще угадывал, красный — чаще ошибался. Время всемирное (UTC).'
+      + '</div>';
   }
 
   /* ------------------------------------------------- Свечной график (LWC) */
@@ -557,14 +558,14 @@
       + '<div class="metric"><div class="metric-value">' + (today.decided + today.active) + '</div>'
       + '<div class="metric-label">сигналов</div></div>'
       + '<div class="metric"><div class="metric-value ' + (today.decided ? signClass(today.winrate - 50) : 'dim') + '">'
-      + (today.decided ? today.winrate + '%' : '—') + '</div><div class="metric-label">winrate</div></div>'
+      + (today.decided ? today.winrate + '%' : '—') + '</div><div class="metric-label">точность</div></div>'
       + '<div class="metric"><div class="metric-value ' + signClass(today.total_r) + '">'
       + (today.total_r > 0 ? '+' : '') + today.total_r.toFixed(1) + 'R</div>'
       + '<div class="metric-label">результат</div></div></div>';
 
     if (all.decided > 0) {
       html += '<div class="note">За всё время: <b>' + all.decided + '</b> завершённых, '
-        + 'winrate <b>' + all.winrate + '%</b>, суммарно <b>'
+        + 'точность <b>' + all.winrate + '%</b>, итог <b>'
         + (all.total_r > 0 ? '+' : '') + all.total_r.toFixed(2) + 'R</b>.'
         + (all.decided < 20 ? ' Выборка пока мала для выводов.' : '') + '</div>';
     }
@@ -627,9 +628,9 @@
     html += '<div class="card"><div class="donut-wrap">' + donut(s.winrate)
       + '<div class="donut-legend">'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--green)"></span>'
-      + '<span class="legend-label">Цель достигнута</span><span class="legend-value">' + s.wins + '</span></div>'
+      + '<span class="legend-label">Угадал</span><span class="legend-value">' + s.wins + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--red)"></span>'
-      + '<span class="legend-label">Сработал стоп</span><span class="legend-value">' + s.losses + '</span></div>'
+      + '<span class="legend-label">Не угадал</span><span class="legend-value">' + s.losses + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--muted)"></span>'
       + '<span class="legend-label">Истекли</span><span class="legend-value">' + s.expired + '</span></div>'
       + '<div class="legend-row"><span class="legend-dot" style="background:var(--amber)"></span>'
@@ -637,33 +638,35 @@
       + '</div></div>';
     if (s.decided < 20) {
       html += '<div class="note">⚠️ Всего ' + s.decided + ' завершённых сигналов. '
-        + 'Для честной оценки нужно хотя бы 30–50 — сейчас цифры сильно зависят '
-        + 'от случайности.</div>';
+        + 'Это мало: при таком количестве результат почти целиком зависит '
+        + 'от везения. Судить можно с 30–50.</div>';
     }
     html += '</div>';
 
     html += '<div class="grid-3" style="margin-top:12px">'
       + '<div class="metric"><div class="metric-value ' + signClass(s.total_r) + '">'
       + (s.total_r > 0 ? '+' : '') + s.total_r.toFixed(1) + 'R</div>'
-      + '<div class="metric-label">суммарно</div></div>'
+      + '<div class="metric-label">итог в размерах риска</div></div>'
       + '<div class="metric"><div class="metric-value ' + signClass(s.avg_r) + '">'
       + (s.avg_r > 0 ? '+' : '') + s.avg_r.toFixed(2) + 'R</div>'
-      + '<div class="metric-label">на сигнал</div></div>'
+      + '<div class="metric-label">в среднем за сигнал</div></div>'
       + '<div class="metric"><div class="metric-value">' + s.profit_factor + '</div>'
-      + '<div class="metric-label">проф.-фактор</div></div></div>';
+      + '<div class="metric-label">прибыль / убыток</div></div></div>';
 
     if (payload.equity && payload.equity.length > 1) {
-      html += '<div class="section-title">Накопленный результат</div><div class="card">'
+      html += '<div class="section-title">Как рос счёт</div><div class="card">'
         + equityChart(payload.equity)
-        + '<div class="note">Каждая точка — закрытый сигнал. По вертикали сумма '
-        + 'в единицах риска (R): +1R это прибыль, равная одному риску.</div></div>';
+        + '<div class="note">Каждая точка — завершённый сигнал. Линия вверх — '
+        + 'счёт растёт. Единица по вертикали равна тому, чем вы рискуете '
+        + 'в одной сделке: +2 значит заработали вдвое больше, чем рисковали.'
+        + '</div></div>';
     }
     const hrs = hoursChart(payload.by_hour || []);
-    if (hrs) html += '<div class="section-title">Когда бот точнее</div><div class="card">' + hrs + '</div>';
+    if (hrs) html += '<div class="section-title">В какие часы точнее</div><div class="card">' + hrs + '</div>';
 
     if (payload.by_symbol && payload.by_symbol.length) {
       html += '<div class="section-title">По инструментам</div><div class="card">'
-        + '<table class="table"><thead><tr><th>Инструмент</th><th>Сигналов</th><th>Winrate</th></tr></thead><tbody>';
+        + '<table class="table"><thead><tr><th>Инструмент</th><th>Сигналов</th><th>Точность</th></tr></thead><tbody>';
       payload.by_symbol.forEach(function (row) {
         const cls = row.winrate >= 55 ? 'pos' : (row.winrate >= 45 ? '' : 'neg');
         html += '<tr><td>' + escapeHtml(shortSymbol(row.symbol)) + '</td><td>'
@@ -681,9 +684,9 @@
       + '<span class="pos nums">' + pct(s.best_pct) + '</span></div>'
       + '<div class="switch-row"><span class="switch-label">Худший сигнал</span>'
       + '<span class="neg nums">' + pct(s.worst_pct) + '</span></div>'
-      + '<div class="switch-row"><span class="switch-label">Лучшая серия</span>'
+      + '<div class="switch-row"><span class="switch-label">Удач подряд, максимум</span>'
       + '<span class="nums">' + s.max_win_streak + ' подряд</span></div>'
-      + '<div class="switch-row"><span class="switch-label">Худшая серия</span>'
+      + '<div class="switch-row"><span class="switch-label">Неудач подряд, максимум</span>'
       + '<span class="nums">' + s.max_loss_streak + ' подряд</span></div></div>';
 
     return html + '</div>';

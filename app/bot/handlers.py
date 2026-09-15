@@ -267,6 +267,47 @@ async def cmd_settings(message: Message) -> None:
     await message.answer(text, reply_markup=markup)
 
 
+@router.message(Command("test"))
+async def cmd_test(message: Message) -> None:
+    """Проверка доставки: шлёт образец сигнала всем получателям."""
+    notifier = runtime.get("notifier")
+    if notifier is None:
+        await message.answer(
+            "Отправка недоступна: бот запущен в урезанном режиме."
+        )
+        return
+
+    await message.answer("🧪 Отправляю тестовый сигнал…")
+    report = await notifier.send_test()
+
+    lines = [
+        "<b>Результат проверки</b>",
+        "",
+        f"Инструмент: <b>{fmt.short_symbol(report['symbol'])}</b>",
+        f"Цена сейчас: <b>{fmt.money(report['price'])}</b>",
+        "",
+    ]
+    if report["sent"]:
+        lines.append(f"✅ Доставлено: <b>{len(report['sent'])}</b>")
+        for chat_id in report["sent"]:
+            lines.append(f"   • <code>{chat_id}</code>")
+    if report["failed"]:
+        lines.append("")
+        lines.append(f"❌ Не доставлено: <b>{len(report['failed'])}</b>")
+        for chat_id, reason in report["failed"]:
+            lines.append(f"   • <code>{chat_id}</code> — {reason}")
+        lines.append("")
+        lines.append(
+            "<i>Получатель должен сам открыть бота и отправить /start — "
+            "до этого Telegram не даёт ему писать.</i>"
+        )
+
+    lines.append("")
+    lines.append("<i>Тестовый сигнал в журнал не записан "
+                 "и на статистику не влияет.</i>")
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
     await message.answer("Выберите раздел:", reply_markup=kb.main_menu())

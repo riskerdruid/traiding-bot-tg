@@ -195,9 +195,11 @@ def signal_card(signal: repo.Signal) -> str:
         lines.append("")
         lines.append("<i>" + " · ".join(chips) + "</i>")
 
-    lines.append(
-        f"<i>{signal.timeframe} · {local_time(signal.created_at)} · сигнал #{signal.id}</i>"
-    )
+    # У образца для проверки доставки номера в журнале нет — не показываем «#0»
+    tail = f"{signal.timeframe} · {local_time(signal.created_at)}"
+    if signal.id:
+        tail += f" · сигнал #{signal.id}"
+    lines.append(f"<i>{tail}</i>")
     return "\n".join(lines)
 
 
@@ -252,9 +254,11 @@ def binary_signal_card(signal: repo.Signal) -> str:
         lines.append("")
         lines.append("<i>" + " · ".join(chips) + "</i>")
 
-    lines.append(
-        f"<i>{signal.timeframe} · {local_time(signal.created_at)} · сигнал #{signal.id}</i>"
-    )
+    # У образца для проверки доставки номера в журнале нет — не показываем «#0»
+    tail = f"{signal.timeframe} · {local_time(signal.created_at)}"
+    if signal.id:
+        tail += f" · сигнал #{signal.id}"
+    lines.append(f"<i>{tail}</i>")
     return "\n".join(lines)
 
 
@@ -266,6 +270,65 @@ def binary_stake(signal: repo.Signal) -> str | None:
         return None
     stake = deposit * risk_pct / 100
     return f"{amount(stake)} ({risk_pct:g}% от {amount(deposit)})"
+
+
+def test_signal_card(symbol: str, price: float, is_binary: bool = False) -> str:
+    """Карточка-образец по текущей цене.
+
+    Выглядит как настоящий сигнал, но с явной пометкой, чтобы никто
+    не принял её за рекомендацию. В журнал не записывается.
+    """
+    header = [
+        "🧪 <b>ТЕСТОВОЕ СООБЩЕНИЕ</b>",
+        "<i>Это проверка доставки, а не сигнал. "
+        "Ничего делать не нужно.</i>",
+        "",
+        "Так будет выглядеть настоящий сигнал:",
+        "",
+        "━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    now = int(datetime.now(tz=timezone.utc).timestamp())
+    if is_binary:
+        sample = repo.Signal(
+            id=0, symbol=symbol, side="LONG", timeframe=config.get("timeframe"),
+            entry=price, stop_loss=price, take_profit=price, confidence=74,
+            reasons=[
+                "EMA9 пересекла EMA21 снизу вверх",
+                "ADX 24 — тренд подтверждён",
+                "Старший ТФ в том же направлении",
+            ],
+            indicators={"rsi": 58.0, "adx": 24.0},
+            status=repo.ACTIVE, created_at=now, kind="binary", broker="po",
+            expiry_at=now + int(config.get("po_expiry_min") or 5) * 60,
+            payout=92.0,
+        )
+    else:
+        atr = price * 0.0015
+        risk = atr * float(config.get("atr_sl_mult") or 1.5)
+        sample = repo.Signal(
+            id=0, symbol=symbol, side="LONG", timeframe=config.get("timeframe"),
+            entry=price, stop_loss=price - risk,
+            take_profit=price + risk * float(config.get("risk_reward") or 1.8),
+            confidence=74,
+            reasons=[
+                "EMA9 пересекла EMA21 снизу вверх",
+                "ADX 24 — тренд подтверждён",
+                "Цена выше EMA50",
+            ],
+            indicators={"rsi": 58.0, "adx": 24.0, "atr": round(atr, 4)},
+            status=repo.ACTIVE, created_at=now,
+        )
+
+    footer = [
+        "",
+        "━━━━━━━━━━━━━━━",
+        "",
+        "✅ Доставка работает. Настоящие сигналы придут так же, "
+        "но без этой пометки.",
+    ]
+    return "\n".join(header) + signal_card(sample) + "\n".join(footer)
 
 
 def outcome_card(signal: repo.Signal) -> str:
@@ -376,7 +439,7 @@ def stats_card(data: dict, period_name: str, by_symbol: list[dict] | None = None
     lines = [
         f"📊 <b>Статистика · {period_name}</b>",
         "",
-        f"{verdict} <b>Winrate {winrate}%</b>  <code>{bar(winrate)}</code>",
+        f"{verdict} <b>Точность {winrate}%</b>  <code>{bar(winrate)}</code>",
         f"<i>по {data['decided']} завершённым сигналам</i>",
         "",
         f"✅ Цель      <b>{data['wins']}</b>",
@@ -384,9 +447,9 @@ def stats_card(data: dict, period_name: str, by_symbol: list[dict] | None = None
         f"⌛ Истекли   <b>{data['expired']}</b>",
         f"⏳ В работе  <b>{data['active']}</b>",
         "",
-        f"Результат       <b>{data['total_r']:+.2f}R</b>",
-        f"На сигнал       <b>{data['avg_r']:+.2f}R</b>",
-        f"Профит-фактор   <b>{data['profit_factor']}</b>",
+        f"Итог            <b>{data['total_r']:+.2f}R</b>  <i>в размерах риска</i>",
+        f"В среднем       <b>{data['avg_r']:+.2f}R</b>  <i>за один сигнал</i>",
+        f"Прибыль / убыток <b>{data['profit_factor']}</b>  <i>во сколько раз больше</i>",
     ]
 
     if data["wins"]:
@@ -429,7 +492,7 @@ def daily_report(data: dict, signals_today: list[repo.Signal]) -> str:
     if data["decided"]:
         lines += [
             f"Закрыто          <b>{data['decided']}</b>",
-            f"Winrate          <b>{data['winrate']}%</b>",
+            f"Точность         <b>{data['winrate']}%</b>",
             f"Результат        <b>{data['total_r']:+.2f}R</b>",
         ]
     else:

@@ -105,6 +105,7 @@ class Application:
             "scanner": self.scanner,
             "tracker": self.tracker,
             "started_at": self.started_at,
+            "notifier": self.notifier,
         }
         bot_handlers.runtime.update(shared)
         api_server.runtime.update(shared)
