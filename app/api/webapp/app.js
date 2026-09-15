@@ -685,12 +685,18 @@
   function alertRow(item) {
     const up = item.direction === 'up';
     const distance = item.distance_pct;
+    // Человек заказывал движение — так ему и показываем: расчётную цену
+    // он не вводил и не узнает её среди своих уровней
+    const what = item.percent != null
+      ? (up ? 'рост на ' : 'падение на ') + item.percent + '% — до ' + money(item.price)
+      : 'при ' + money(item.price);
+
     return '<div class="alert-row">'
       + '<span class="alert-dir ' + (up ? 'up' : 'down') + '">'
       + (up ? '▲' : '▼') + '</span>'
       + '<span class="alert-body">'
       + '<span class="alert-title"><b>' + escapeHtml(shortSymbol(item.symbol))
-      + '</b> при ' + money(item.price) + '</span>'
+      + '</b> ' + what + '</span>'
       + '<span class="alert-meta">'
       + (item.current_price
           ? 'сейчас ' + money(item.current_price)
@@ -704,11 +710,11 @@
 
   function alertsBlock(items, symbols) {
     let html = '<div class="section-title">Уведомления по цене'
-      + qmark('Вы называете цену — бот пишет, когда рынок до неё дошёл. '
-              + 'Это не сигнал на сделку и не автоторговля, просто '
-              + 'будильник.',
+      + qmark('Вы называете цену или процент движения — бот пишет, когда '
+              + 'рынок до этого дошёл. Это не сигнал на сделку и не '
+              + 'автоторговля, просто будильник.',
               '💡 То же самое можно сделать в переписке с ботом: '
-              + 'отправьте ему «биткоин 95000».')
+              + 'отправьте ему «биткоин 95000» или «биткоин -1.5%».')
       + '</div><div class="card">';
 
     const list = symbols && symbols.length ? symbols : [];
@@ -725,14 +731,18 @@
         }).join('')
       + '</select>'
       + '<input class="text-input alert-price" id="alert-price" type="text" '
-      + 'inputmode="decimal" placeholder="цена, например 95000">'
+      + 'inputmode="decimal" placeholder="95000 или -1.5%">'
       + '<button class="btn-primary alert-add" id="alert-add">Сообщить</button>'
-      + '</div>';
+      + '</div>'
+      + '<div class="alert-tip">Впишите <b>цену</b> — сообщу, когда рынок '
+      + 'до неё дойдёт. Или <b>процент</b>: <code>-1.5%</code> — если упадёт '
+      + 'на столько, <code>+2%</code> — если вырастет, <code>2%</code> — '
+      + 'если сдвинется в любую сторону.</div>';
 
     if (!items || !items.length) {
       html += '<div class="alert-empty">Пока ничего не заказано. '
-        + 'Выберите инструмент, впишите цену — и я напишу, когда рынок '
-        + 'её достигнет.</div>';
+        + 'Выберите инструмент и впишите цену или процент — я напишу, '
+        + 'когда рынок до этого дойдёт.</div>';
     } else {
       html += '<div class="alert-list">' + items.map(alertRow).join('') + '</div>';
     }
@@ -748,20 +758,43 @@
       if (!symbol || !price) return;
       const value = String(price.value).replace(',', '.').trim();
       if (!value) {
-        toast('Впишите цену', 'error');
+        toast('Впишите цену или процент', 'error');
         haptic('error');
         return;
       }
+
+      // «-1.5%» — это движение, «95000» — цена. Разбираем здесь, чтобы
+      // сразу сказать человеку понятными словами, что получилось
+      const body = { symbol: symbol.value };
+      const asPercent = value.match(/^([+-]?)\s*([\d.]+)\s*%$/);
+      if (asPercent) {
+        body.percent = asPercent[2];
+        if (asPercent[1] === '-') body.direction = 'down';
+        else if (asPercent[1] === '+') body.direction = 'up';
+      } else {
+        body.price = value;
+      }
+
       add.disabled = true;
       try {
         const created = await api('/api/alerts', {
           method: 'POST',
-          body: JSON.stringify({ symbol: symbol.value, price: value }),
+          body: JSON.stringify(body),
         });
         haptic('success');
-        const side = created.direction === 'up' ? 'вырастет' : 'опустится';
-        toast('Сообщу, когда ' + shortSymbol(created.symbol) + ' ' + side
-              + ' до ' + money(created.price));
+        const name = shortSymbol(created.symbol);
+        if (created.percent != null && (created.items || []).length > 1) {
+          toast('Сообщу, если ' + name + ' сдвинется на '
+                + created.percent + '% в любую сторону');
+        } else if (created.percent != null) {
+          toast('Сообщу, если ' + name
+                + (created.direction === 'up' ? ' вырастет на ' : ' упадёт на ')
+                + created.percent + '% — до ' + money(created.price));
+        } else {
+          toast('Сообщу, когда ' + name
+                + (created.direction === 'up' ? ' вырастет' : ' опустится')
+                + ' до ' + money(created.price));
+        }
         price.value = '';
         loadScreen('overview', true);
       } catch (err) {

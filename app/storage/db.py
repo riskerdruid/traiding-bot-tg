@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     direction    TEXT    NOT NULL,       -- up | down: с какой стороны подходим
     start_price  REAL,                   -- цена в момент заказа, для сравнения
     note         TEXT    NOT NULL DEFAULT '',
+    percent      REAL,                   -- если уровень задан движением в %
     repeat       INTEGER NOT NULL DEFAULT 0,  -- 1 — не гасить после срабатывания
     status       TEXT    NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE|DONE|CANCELLED
     created_at   INTEGER NOT NULL,
@@ -116,6 +117,8 @@ _MIGRATIONS: list[str] = [
     # У каждого получателя свой журнал: настройки, а значит и сигналы, разные
     "ALTER TABLE signals ADD COLUMN owner_id INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_id)",
+    # Уведомление можно заказать не только по цене, но и по движению в %
+    "ALTER TABLE alerts ADD COLUMN percent REAL",
 ]
 
 

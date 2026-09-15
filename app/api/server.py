@@ -397,34 +397,50 @@ def create_app() -> FastAPI:
         symbol = str(payload.get("symbol") or "").strip()
         note = str(payload.get("note") or "")[:120]
         price = payload.get("price")
+        percent = payload.get("percent")
+        direction = payload.get("direction") or None
 
+        # Поле ввода одно, и в нём может оказаться как «95000», так
+        # и «-1.5%». Разбираем тем же кодом, что и сообщения боту, —
+        # чтобы приложение и переписка понимали человека одинаково.
         text = str(payload.get("text") or "").strip()
-        if text and (not symbol or price is None):
-            parsed = alerts_input.parse_request(text)
+        if not text and isinstance(price, str) and "%" in price:
+            text = price
+            price = None
+
+        if text and price is None and percent is None:
+            parsed = alerts_input.parse_request(
+                text if not symbol else f"{symbol} {text}"
+            )
             if parsed is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="Не нашёл цену. Напишите, например: биткоин 95000",
+                    detail="Не нашёл число. Напишите, например: "
+                           "биткоин 95000 или биткоин -1.5%",
                 )
-            names, price, parsed_note = parsed
-            note = note or parsed_note
+            price, percent = parsed.price, parsed.percent
+            direction = direction or parsed.direction
+            note = note or parsed.note
             known = list(config.get("symbols", user_id=uid) or [])
-            symbol = symbol or (alerts_input.resolve_any(names, known) or "")
+            symbol = symbol or (alerts_input.resolve_any(parsed.names, known) or "")
             if not symbol:
                 raise HTTPException(
                     status_code=400,
                     detail="Не понял, о каком инструменте речь. "
-                           "Напишите его название перед ценой.",
+                           "Напишите его название перед числом.",
                 )
 
         if not symbol:
             raise HTTPException(status_code=400, detail="Не указан инструмент")
-        try:
-            price = float(str(price).replace(",", "."))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Цена должна быть числом")
-        if price <= 0:
-            raise HTTPException(status_code=400, detail="Цена должна быть больше нуля")
+
+        def as_number(value, what: str) -> float:
+            try:
+                number = float(str(value).replace(",", ".").replace("%", "").strip())
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{what} должно быть числом")
+            if number <= 0:
+                raise HTTPException(status_code=400, detail=f"{what} должно быть больше нуля")
+            return number
 
         current = await feed.fetch_price(symbol)
         if current is None:
@@ -433,15 +449,40 @@ def create_app() -> FastAPI:
                 detail="Не удалось узнать текущую цену этого инструмента",
             )
 
-        alert = await repo.create_alert(
-            owner_id=uid, symbol=symbol, price=price,
-            start_price=current, note=note,
-            repeat=bool(payload.get("repeat")),
-        )
-        data = alert.to_dict()
-        data["current_price"] = current
-        data["distance_pct"] = abs(current - price) / current * 100
-        return data
+        if percent is not None:
+            percent = as_number(percent, "Движение в процентах")
+            if direction:
+                created = [await repo.create_alert(
+                    owner_id=uid, symbol=symbol, percent=percent,
+                    direction=direction, start_price=current, note=note,
+                    repeat=bool(payload.get("repeat")),
+                )]
+            else:
+                # Без знака человек ждёт движения в любую сторону
+                created = await repo.create_alert_pair(
+                    owner_id=uid, symbol=symbol, percent=percent,
+                    start_price=current, note=note,
+                )
+        else:
+            price = as_number(price, "Цена")
+            created = [await repo.create_alert(
+                owner_id=uid, symbol=symbol, price=price,
+                start_price=current, note=note,
+                repeat=bool(payload.get("repeat")),
+            )]
+
+        items = []
+        for alert in created:
+            data = alert.to_dict()
+            data["current_price"] = current
+            data["distance_pct"] = abs(current - alert.price) / current * 100
+            items.append(data)
+
+        # Одиночный случай остаётся плоским: так проще и приложению,
+        # и любому другому клиенту
+        result = dict(items[0])
+        result["items"] = items
+        return result
 
     @app.delete("/api/alerts/{alert_id}")
     async def alerts_delete(

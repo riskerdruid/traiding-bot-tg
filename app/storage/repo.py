@@ -685,6 +685,10 @@ class Alert:
     created_at: int
     triggered_at: int | None = None
     hit_price: float | None = None
+    # Уровень мог быть задан не ценой, а движением в процентах от текущей.
+    # Само движение храним, чтобы сказать человеку «упал на 1.5%», а не
+    # только назвать цену, которую он не вводил.
+    percent: float | None = None
 
     @property
     def is_active(self) -> bool:
@@ -706,6 +710,7 @@ class Alert:
             "start_price": self.start_price,
             "note": self.note,
             "repeat": self.repeat,
+            "percent": self.percent,
             "status": self.status,
             "created_at": self.created_at,
             "triggered_at": self.triggered_at,
@@ -723,6 +728,7 @@ def _row_to_alert(row: Any) -> Alert:
         start_price=row["start_price"],
         note=row["note"] or "",
         repeat=bool(row["repeat"]),
+        percent=row["percent"],
         status=row["status"],
         created_at=row["created_at"],
         triggered_at=row["triggered_at"],
@@ -734,18 +740,34 @@ async def create_alert(
     *,
     owner_id: int,
     symbol: str,
-    price: float,
+    price: float | None = None,
     start_price: float | None = None,
     direction: str | None = None,
     note: str = "",
     repeat: bool = False,
+    percent: float | None = None,
 ) -> Alert:
     """Заводит уведомление.
+
+    Уровень задаётся либо ценой, либо движением в процентах от текущей —
+    во втором случае цену считаем здесь и дальше живём с обычным уровнем.
+    Так вся проверка остаётся одной строчкой сравнения.
 
     Сторону определяем сами по текущей цене: человек называет число,
     а не направление. Если цена уже выше заказанной, ждать её сверху
     бессмысленно — значит, ждём снижения.
     """
+    if percent is not None:
+        if start_price is None:
+            raise ValueError("Для движения в процентах нужна текущая цена")
+        if direction is None:
+            direction = UP
+        shift = start_price * float(percent) / 100
+        price = start_price + shift if direction == UP else start_price - shift
+
+    if price is None:
+        raise ValueError("Не задан уровень уведомления")
+
     if direction is None:
         direction = UP if (start_price is None or price >= start_price) else DOWN
 
@@ -755,11 +777,11 @@ async def create_alert(
         """
         INSERT INTO alerts
             (owner_id, symbol, price, direction, start_price, note,
-             repeat, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             repeat, status, created_at, percent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (owner_id, symbol, float(price), direction, start_price, note,
-         int(bool(repeat)), ALERT_ACTIVE, now),
+         int(bool(repeat)), ALERT_ACTIVE, now, percent),
     )
     await conn.commit()
     return Alert(
@@ -773,7 +795,32 @@ async def create_alert(
         repeat=bool(repeat),
         status=ALERT_ACTIVE,
         created_at=now,
+        percent=percent,
     )
+
+
+async def create_alert_pair(
+    *,
+    owner_id: int,
+    symbol: str,
+    percent: float,
+    start_price: float,
+    note: str = "",
+) -> list[Alert]:
+    """Движение на N процентов в любую сторону — это два уведомления.
+
+    Человек, написавший просто «биткоин 2%», хочет знать о заметном
+    движении, а не о росте именно вверх. Двумя записями это выражается
+    честнее, чем одна запись с признаком: сработает та, до которой
+    дошла цена, вторую можно снять.
+    """
+    return [
+        await create_alert(
+            owner_id=owner_id, symbol=symbol, percent=percent,
+            start_price=start_price, direction=side, note=note,
+        )
+        for side in (UP, DOWN)
+    ]
 
 
 async def get_alert(alert_id: int) -> Alert | None:

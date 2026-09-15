@@ -148,7 +148,7 @@ async def screen_alerts(uid: int) -> tuple[str, object]:
 
 
 async def create_alert_from_text(uid: int, text: str) -> str | None:
-    """Пробует понять «биткоин 95000» и завести уведомление.
+    """Пробует понять «биткоин 95000» или «биткоин -1.5%» и завести уведомление.
 
     Возвращает готовый ответ человеку или None, если в сообщении вообще
     не было похоже на заказ уровня — тогда отвечает общий обработчик.
@@ -156,15 +156,15 @@ async def create_alert_from_text(uid: int, text: str) -> str | None:
     parsed = alerts_input.parse_request(text)
     if parsed is None:
         return None
-    names, price, note = parsed
 
     known = list(config.get("symbols", user_id=uid) or [])
-    symbol = alerts_input.resolve_any(names, known)
+    symbol = alerts_input.resolve_any(parsed.names, known)
     if symbol is None:
         return (
-            "🤔 Цену я понял, а вот инструмент — нет.\n\n"
-            "Напишите название в начале: <code>биткоин 95000</code>, "
-            "<code>золото 4400</code>, <code>BTC 95000</code>.\n\n"
+            "🤔 Число я понял, а вот инструмент — нет.\n\n"
+            "Напишите название перед числом:\n"
+            "<code>биткоин 95000</code> — сообщу при этой цене\n"
+            "<code>биткоин -1.5%</code> — сообщу, если упадёт на столько\n\n"
             "Работают и обычные названия, и тикеры."
         )
 
@@ -177,22 +177,58 @@ async def create_alert_from_text(uid: int, text: str) -> str | None:
             "или выберите другой."
         )
 
-    alert = await repo.create_alert(
-        owner_id=uid, symbol=symbol, price=price,
-        start_price=current, note=note,
-    )
+    name = fmt.short_symbol(symbol)
 
-    direction = "вырастет до" if alert.direction == repo.UP else "опустится до"
-    distance = abs(current - price) / current * 100 if current else 0
-    answer = [
-        f"🔔 <b>Принято.</b> Сообщу, когда "
-        f"{fmt.short_symbol(symbol)} {direction} <b>{fmt.money(price)}</b>.",
-        "",
-        f"Сейчас: <b>{fmt.money(current)}</b> — идти "
-        f"{distance:.2f}% {'вверх' if alert.direction == repo.UP else 'вниз'}.",
-    ]
-    if note:
-        answer.append(f"📝 Заметка: <i>{note}</i>")
+    # --- движение в процентах ---
+    if parsed.by_percent:
+        if parsed.direction is None:
+            # «биткоин 2%» без знака — человек ждёт заметного движения,
+            # а не роста именно вверх. Ставим оба уровня.
+            pair = await repo.create_alert_pair(
+                owner_id=uid, symbol=symbol, percent=parsed.percent,
+                start_price=current, note=parsed.note,
+            )
+            up, down = pair[0], pair[1]
+            answer = [
+                f"🔔 <b>Принято.</b> Сообщу, если {name} сдвинется "
+                f"на <b>{parsed.percent:g}%</b> в любую сторону.",
+                "",
+                f"Сейчас: <b>{fmt.money(current)}</b>",
+                f"▲ вверх — при {fmt.money(up.price)}",
+                f"▼ вниз — при {fmt.money(down.price)}",
+            ]
+        else:
+            alert = await repo.create_alert(
+                owner_id=uid, symbol=symbol, percent=parsed.percent,
+                direction=parsed.direction, start_price=current,
+                note=parsed.note,
+            )
+            move = "вырастет" if alert.direction == repo.UP else "упадёт"
+            answer = [
+                f"🔔 <b>Принято.</b> Сообщу, если {name} {move} "
+                f"на <b>{parsed.percent:g}%</b>.",
+                "",
+                f"Сейчас: <b>{fmt.money(current)}</b>, "
+                f"сработает при <b>{fmt.money(alert.price)}</b>.",
+            ]
+    else:
+        # --- конкретная цена ---
+        alert = await repo.create_alert(
+            owner_id=uid, symbol=symbol, price=parsed.price,
+            start_price=current, note=parsed.note,
+        )
+        direction = "вырастет до" if alert.direction == repo.UP else "опустится до"
+        distance = abs(current - parsed.price) / current * 100 if current else 0
+        answer = [
+            f"🔔 <b>Принято.</b> Сообщу, когда "
+            f"{name} {direction} <b>{fmt.money(parsed.price)}</b>.",
+            "",
+            f"Сейчас: <b>{fmt.money(current)}</b> — идти "
+            f"{distance:.2f}% {'вверх' if alert.direction == repo.UP else 'вниз'}.",
+        ]
+
+    if parsed.note:
+        answer.append(f"📝 Заметка: <i>{parsed.note}</i>")
     answer += [
         "",
         "<i>Это просто будильник по цене, не совет на сделку. "

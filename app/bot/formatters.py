@@ -796,10 +796,18 @@ def alert_card(alert: repo.Alert, price: float, snapshot: dict | None = None) ->
     """Сообщение о том, что цена дошла до заказанного уровня."""
     snapshot = snapshot or {}
     name = short_symbol(alert.symbol)
-    side = "поднялся до" if alert.direction == repo.UP else "опустился до"
+
+    if alert.percent is not None:
+        # Человек заказывал движение, а не цену: так ему и говорим,
+        # иначе он увидит незнакомое число и будет гадать, откуда оно
+        move = "вырос" if alert.direction == repo.UP else "упал"
+        head = f"🔔 <b>{name} {move} на {alert.percent:g}%</b>"
+    else:
+        side = "поднялся до" if alert.direction == repo.UP else "опустился до"
+        head = f"🔔 <b>{name} {side} {money(alert.price)}</b>"
 
     lines = [
-        f"🔔 <b>{name} {side} {money(alert.price)}</b>",
+        head,
         "",
         f"Сейчас: <b>{money(price)}</b>",
     ]
@@ -844,8 +852,8 @@ def alert_card(alert: repo.Alert, price: float, snapshot: dict | None = None) ->
 
     lines += [
         "",
-        "<i>Это не сигнал на сделку: бот просто сообщил о цене, "
-        "о которой вы просили. Решение — за вами.</i>",
+        "<i>Это не сигнал на сделку: бот сообщил ровно о том, "
+        "о чём вы просили. Решение — за вами.</i>",
     ]
     if alert.repeat:
         lines.append(
@@ -864,10 +872,12 @@ def alerts_list_card(alerts: list[repo.Alert], prices: dict | None = None) -> st
             "Пока ни одного. Это простая вещь: вы называете цену — "
             "бот пишет, когда рынок до неё дошёл.\n\n"
             "Просто отправьте сообщение вида:\n"
-            "<code>биткоин 95000</code>\n"
-            "<code>золото 4400</code>\n"
+            "<code>биткоин 95000</code> — сообщу при этой цене\n"
+            "<code>биткоин -1.5%</code> — если упадёт на столько\n"
+            "<code>биткоин +2%</code> — если вырастет\n"
+            "<code>биткоин 2%</code> — если сдвинется в любую сторону\n"
             "<code>BTC 95000 продать половину</code>\n\n"
-            "Последнее слово после цены — заметка для себя, "
+            "Всё, что напишете после числа, станет заметкой для себя — "
             "она вернётся вместе с уведомлением."
         )
 
@@ -876,7 +886,14 @@ def alerts_list_card(alerts: list[repo.Alert], prices: dict | None = None) -> st
         name = short_symbol(alert.symbol)
         now = prices.get(alert.symbol)
         arrow = "выше" if alert.direction == repo.UP else "ниже"
-        line = f"• <b>{name}</b> — сообщить при {money(alert.price)} ({arrow})"
+        if alert.percent is not None:
+            move = "рост" if alert.direction == repo.UP else "падение"
+            line = (
+                f"• <b>{name}</b> — {move} на {alert.percent:g}% "
+                f"(это {money(alert.price)})"
+            )
+        else:
+            line = f"• <b>{name}</b> — сообщить при {money(alert.price)} ({arrow})"
         if now:
             distance = abs(now - alert.price) / now * 100 if now else 0
             line += f"\n  сейчас {money(now)}, осталось {distance:.2f}%"
@@ -887,6 +904,7 @@ def alerts_list_card(alerts: list[repo.Alert], prices: dict | None = None) -> st
     lines += [
         "",
         "<i>Чтобы добавить ещё — отправьте сообщение вида "
-        "«биткоин 95000». Чтобы убрать — кнопкой ниже.</i>",
+        "«биткоин 95000» или «биткоин -1.5%». "
+        "Чтобы убрать — кнопкой ниже.</i>",
     ]
     return "\n".join(lines)

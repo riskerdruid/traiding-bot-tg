@@ -506,6 +506,10 @@ async def test_api() -> None:
 
         r = client.post("/api/alerts", json={"text": "просто текст"})
         check("текст без цены -> 400", r.status_code == 400, f"={r.status_code}")
+
+        r = client.post("/api/alerts", json={"symbol": "TEST/USDT", "price": "2%"})
+        check("процент тоже проверяет инструмент",
+              r.status_code == 400, f"={r.status_code}")
         check("и объяснение человеческое", "цен" in r.json()["detail"].lower(),
               r.json()["detail"])
 
@@ -912,16 +916,39 @@ async def test_price_alerts() -> None:
         parsed = ai.parse_request(text)
         ok = parsed is not None
         if ok:
-            names, price, note = parsed
-            symbol = ai.resolve_any(names, known)
-            ok = symbol == want_symbol and abs(price - want_price) < 1e-9 \
-                and note == want_note
+            symbol = ai.resolve_any(parsed.names, known)
+            ok = (symbol == want_symbol
+                  and parsed.price is not None
+                  and abs(parsed.price - want_price) < 1e-9
+                  and parsed.note == want_note)
         check(f"разбирает «{text}»", ok, str(parsed))
 
     for text in ("привет", "как дела", "5 минут"):
         parsed = ai.parse_request(text)
-        resolved = ai.resolve_any(parsed[0], known) if parsed else None
+        resolved = ai.resolve_any(parsed.names, known) if parsed else None
         check(f"не выдумывает из «{text}»", resolved is None, str(parsed))
+
+    # --- движение в процентах ---
+    percent_cases = [
+        ("биткоин -1.5%", "BTC/USDT:USDT", 1.5, repo.DOWN),
+        ("биткоин +2%", "BTC/USDT:USDT", 2.0, repo.UP),
+        ("биткоин 2%", "BTC/USDT:USDT", 2.0, None),
+        ("золото упадёт на 1,5%", "XAU/USDT:USDT", 1.5, repo.DOWN),
+        ("эфир вырастет на 3 %", "ETH/USDT:USDT", 3.0, repo.UP),
+        ("уведоми если биткоин упадёт на 1.5%", "BTC/USDT:USDT", 1.5, repo.DOWN),
+    ]
+    for text, want_symbol, want_pct, want_dir in percent_cases:
+        parsed = ai.parse_request(text)
+        ok = parsed is not None and parsed.by_percent
+        if ok:
+            ok = (ai.resolve_any(parsed.names, known) == want_symbol
+                  and abs(parsed.percent - want_pct) < 1e-9
+                  and parsed.direction == want_dir)
+        check(f"разбирает «{text}»", ok, str(parsed))
+
+    check("цена и процент не путаются",
+          ai.parse_request("биткоин 95000").percent is None
+          and ai.parse_request("биткоин 2%").price is None)
 
     check("тикер из имени брокера", ai.base_of("po:EURUSD_otc") == "EURUSD")
     check("валютная пара склеивается", ai.base_of("EUR/USD") == "EURUSD")
@@ -944,6 +971,43 @@ async def test_price_alerts() -> None:
     mine = await repo.list_alerts(owner_id=777001)
     check("вижу только свои", len(mine) == 2 and all(a.owner_id == 777001 for a in mine))
     check("чужое не видно", all(a.id != other.id for a in mine))
+
+    # --- уровень из процента ---
+    pct_up = await repo.create_alert(
+        owner_id=777001, symbol="BTC/USDT:USDT", percent=2,
+        direction=repo.UP, start_price=100000,
+    )
+    pct_down = await repo.create_alert(
+        owner_id=777001, symbol="BTC/USDT:USDT", percent=1.5,
+        direction=repo.DOWN, start_price=100000,
+    )
+    check("рост на 2% — это цена выше", pct_up.price == 102000.0, str(pct_up.price))
+    check("падение на 1.5% — цена ниже", pct_down.price == 98500.0, str(pct_down.price))
+    check("процент запомнен", pct_up.percent == 2)
+    check("сработает от расчётной цены",
+          pct_up.reached(102000) and not pct_up.reached(101999))
+
+    pair = await repo.create_alert_pair(
+        owner_id=777001, symbol="XAU/USDT:USDT", percent=1, start_price=4000,
+    )
+    check("движение в любую сторону — два уровня", len(pair) == 2)
+    check("один вверх, другой вниз",
+          {a.direction for a in pair} == {repo.UP, repo.DOWN})
+    check("цены посчитаны от текущей",
+          sorted(a.price for a in pair) == [3960.0, 4040.0],
+          str(sorted(a.price for a in pair)))
+
+    try:
+        await repo.create_alert(owner_id=777001, symbol="BTC/USDT:USDT", percent=1)
+        check("без текущей цены процент не считается", False)
+    except ValueError:
+        check("без текущей цены процент не считается", True)
+
+    try:
+        await repo.create_alert(owner_id=777001, symbol="BTC/USDT:USDT")
+        check("пустое уведомление отклоняется", False)
+    except ValueError:
+        check("пустое уведомление отклоняется", True)
 
     # --- когда считать, что дошло ---
     check("вверх: не дошло", not up.reached(94999))
@@ -1033,8 +1097,33 @@ async def test_price_alerts() -> None:
     check("в карточке сказано, что это не сигнал", "не сигнал" in card)
     check("в карточке видно, сколько ждали", "ждало" in card)
 
+    pct_card = fmt.alert_card(
+        repo.Alert(
+            id=2, owner_id=1, symbol="BTC/USDT:USDT", price=98500.0,
+            direction=repo.DOWN, start_price=100000.0, note="",
+            repeat=False, status=repo.ALERT_DONE, created_at=int(time.time()) - 60,
+            percent=1.5,
+        ),
+        98400.0,
+    )
+    check("в процентной карточке сказано про движение",
+          "упал на 1.5%" in pct_card, pct_card[:90])
+    check("и не выдаёт расчётную цену за заказанную",
+          "опустился до" not in pct_card)
+
+    listing = fmt.alerts_list_card([
+        repo.Alert(
+            id=3, owner_id=1, symbol="BTC/USDT:USDT", price=102000.0,
+            direction=repo.UP, start_price=100000.0, note="",
+            repeat=False, status=repo.ALERT_ACTIVE, created_at=int(time.time()),
+            percent=2.0,
+        )
+    ])
+    check("в списке процент виден как движение", "рост на 2%" in listing, listing)
+
     empty = fmt.alerts_list_card([])
     check("пустой список объясняет, как пользоваться", "биткоин 95000" in empty)
+    check("и рассказывает про проценты", "-1.5%" in empty)
 
 
 async def test_brokers_and_binary() -> None:

@@ -13,6 +13,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+
+# Стороны движения — те же, что в хранилище
+UP = "up"
+DOWN = "down"
 
 # Как люди называют инструменты. Ключ — то, что может написать человек,
 # значение — базовый тикер инструмента.
@@ -41,6 +46,55 @@ ALIASES: dict[str, str] = {
 # Цена: число, возможно с пробелами внутри («95 000») и дробной частью
 _PRICE = re.compile(r"(\d[\d\s ]*(?:[.,]\d+)?)")
 
+# Процент: «-1.5%», «+2 %», «1,5%». Знак, если он есть, сразу задаёт сторону.
+_PERCENT = re.compile(r"([+-]?)\s*(\d+(?:[.,]\d+)?)\s*%")
+
+# Слова, по которым понятно направление, когда знака нет
+_DOWN_WORDS = ("упад", "падени", "вниз", "ниже", "снизит", "просед", "минус",
+               "дешев", "подешев", "сдует", "сольёт", "сольет")
+_UP_WORDS = ("вырас", "рост", "вверх", "выше", "подним", "подорож", "плюс",
+             "взлет", "взлёт", "прибав")
+
+
+def direction_from_words(text: str) -> str | None:
+    """Куда человек ждёт движения, если знак не поставлен."""
+    low = (text or "").lower()
+    for word in _DOWN_WORDS:
+        if word in low:
+            return DOWN
+    for word in _UP_WORDS:
+        if word in low:
+            return UP
+    return None
+
+
+def parse_percent(text: str) -> tuple[float, str | None, int, int] | None:
+    """Находит процент движения.
+
+    Возвращает (процент, направление или None, начало, конец). Направление
+    None означает «в любую сторону»: человек написал просто «2%», и логично
+    предупредить его и о росте, и о падении.
+    """
+    match = _PERCENT.search(text or "")
+    if match is None:
+        return None
+    try:
+        value = float(match.group(2).replace(",", "."))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+
+    sign = match.group(1)
+    if sign == "-":
+        direction = DOWN
+    elif sign == "+":
+        direction = UP
+    else:
+        direction = direction_from_words(text)
+    return value, direction, match.start(), match.end()
+
+
 # Разделители, которые человек может поставить между названием и ценой
 _JUNK = re.compile(r"^[\s,:;=\-–—>@]+|[\s,:;=\-–—<]+$")
 
@@ -62,7 +116,27 @@ def parse_price(text: str) -> tuple[float, int, int] | None:
     return None
 
 
-def parse_request(text: str) -> tuple[list[str], float, str] | None:
+@dataclass(slots=True)
+class Request:
+    """Что человек попросил.
+
+    Либо конкретная цена, либо движение в процентах от текущей —
+    ровно одно из двух. Направление заполнено только для процентов
+    со знаком или со словом: без них уведомить нужно в обе стороны.
+    """
+
+    names: list[str]
+    price: float | None = None
+    percent: float | None = None
+    direction: str | None = None
+    note: str = ""
+
+    @property
+    def by_percent(self) -> bool:
+        return self.percent is not None
+
+
+def parse_request(text: str) -> Request | None:
     """Разбирает фразу на кандидатов в инструменты, цену и заметку.
 
     «биткоин 95000 продать половину»
@@ -80,10 +154,18 @@ def parse_request(text: str) -> tuple[list[str], float, str] | None:
     if not text:
         return None
 
-    found = parse_price(text)
-    if found is None:
-        return None
-    price, start, end = found
+    # Процент проверяем первым: в «-1.5%» тоже есть число, и разбор цены
+    # схватил бы его раньше
+    percent = parse_percent(text)
+    if percent is not None:
+        value, direction, start, end = percent
+        price = None
+    else:
+        found = parse_price(text)
+        if found is None:
+            return None
+        price, start, end = found
+        value, direction = None, None
 
     name = _JUNK.sub("", text[:start])
     note = _JUNK.sub("", text[end:])
@@ -102,7 +184,13 @@ def parse_request(text: str) -> tuple[list[str], float, str] | None:
     # Слова из хвоста идут последними — они менее вероятные кандидаты,
     # но лучше опознать инструмент, чем отказать человеку.
     tail = [w for w in re.split(r"[\s,]+", note) if w]
-    return list(reversed(words)) + tail, price, note[:120]
+    return Request(
+        names=list(reversed(words)) + tail,
+        price=price,
+        percent=value,
+        direction=direction,
+        note=note[:120],
+    )
 
 
 # Окончания в русском меняются («золоту», «биткоина»), а перечислять все
@@ -184,6 +272,16 @@ def fallback_symbol(name: str) -> str | None:
     return FALLBACKS.get(normalize(name))
 
 
+# Слова, которые встречаются рядом с ценой и точно не являются
+# названием инструмента
+_SKIP_WORDS = {
+    "на", "до", "по", "в", "если", "когда", "будет", "станет", "упадёт",
+    "упадет", "вырастет", "поднимется", "опустится", "сообщи", "уведоми",
+    "напиши", "скажи", "процент", "процента", "процентов", "вверх", "вниз",
+    "выше", "ниже", "рост", "падение",
+}
+
+
 def resolve_any(names: list[str], known: list[str]) -> str | None:
     """Первый из кандидатов, который удалось опознать.
 
@@ -192,6 +290,8 @@ def resolve_any(names: list[str], known: list[str]) -> str | None:
     так во фразе выживает только настоящее название.
     """
     for name in names:
+        if name.lower().strip(".,!?") in _SKIP_WORDS:
+            continue
         symbol = resolve(name, known)
         if symbol:
             return symbol
