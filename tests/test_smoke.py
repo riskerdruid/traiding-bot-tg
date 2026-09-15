@@ -424,7 +424,10 @@ async def test_api() -> None:
         r = client.get("/api/help")
         check("/api/help отвечает", r.status_code == 200)
         topics = r.json()["topics"]
-        check("тем в справке не меньше 8", len(topics) >= 8, f"={len(topics)}")
+        check("тем в справке не меньше 12", len(topics) >= 12, f"={len(topics)}")
+        check("есть тема-введение", any(t["id"] == "what" for t in topics))
+        check("есть словарь терминов", any(t["id"] == "glossary" for t in topics))
+        check("есть тема про риск", any(t["id"] == "risk" for t in topics))
         check(
             "у темы есть все поля",
             all(
@@ -438,6 +441,24 @@ async def test_api() -> None:
               any(b["type"] == "steps" for b in ssid_topic["blocks"]))
         check("в теме SSID есть пример строки",
               any(b["type"] == "code" for b in ssid_topic["blocks"]))
+        # Тема целиком уходит одним сообщением, а у Telegram лимит 4096
+        from app import help as help_mod
+
+        too_long = [
+            t["id"] for t in topics
+            if len(help_mod.render_topic_text(t["id"]) or "") > 4000
+        ]
+        check("темы помещаются в сообщение Telegram", not too_long, str(too_long))
+
+        broken = []
+        for t in topics:
+            txt = help_mod.render_topic_text(t["id"]) or ""
+            if (txt.count("<b>") != txt.count("</b>")
+                    or txt.count("<i>") != txt.count("</i>")
+                    or txt.count("<pre>") != txt.count("</pre>")):
+                broken.append(t["id"])
+        check("разметка тем не сломана", not broken, str(broken))
+
         check(
             "блоки известных типов",
             all(
@@ -536,6 +557,12 @@ async def test_settings_store() -> None:
 
     schema = config.schema()
     check("схема содержит все поля", len(schema) >= 25, f"={len(schema)}")
+
+    # Настройка без объяснения бесполезна: человек не знает, что крутит
+    no_hint = [f["key"] for f in schema if not f.get("hint")]
+    check("подсказки у всех настроек", not no_hint, str(no_hint))
+    short = [f["key"] for f in schema if 0 < len(f.get("hint") or "") < 40]
+    check("подсказки содержательные", not short, str(short))
     check("в схеме есть подписи групп", all("group_label" in f for f in schema))
 
     # Возвращаем изменённое, чтобы следующие проверки видели чистое состояние

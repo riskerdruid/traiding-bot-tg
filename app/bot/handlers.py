@@ -143,35 +143,67 @@ async def cmd_start(message: Message) -> None:
     active = await repo.count_signals(status=repo.ACTIVE)
     data = await repo.stats()
 
+    symbols = ", ".join(
+        fmt.short_symbol(s) for s in (config.get("symbols") or [])
+    )
+
     greeting = [
         f"👋 Привет, <b>{name}</b>!",
         "",
-        "Бот следит за рынком и присылает сигналы "
-        "со стопом, целью и объяснением каждого входа.",
+        "Я круглосуточно слежу за графиком и пишу вам, когда вижу "
+        "подходящий момент для сделки. В каждом сообщении будет:",
         "",
-        f"📍 Инструменты: <b>"
-        f"{', '.join(fmt.short_symbol(s) for s in (config.get('symbols') or []))}</b>",
-        f"⏱ Таймфрейм: <b>{config.get('timeframe')}</b>",
+        "• <b>какой актив</b> и <b>в какую сторону</b> ждать движение",
+        "• <b>где выходить</b> — при удаче и при неудаче",
+        "• <b>почему</b> — что именно совпало",
+        "",
+        "Я <b>не торгую</b> за вас: доступа к вашим деньгам у меня нет, "
+        "решение всегда остаётся за вами.",
+        "",
+        "━━━━━━━━━━━━━━━",
+        "",
+        f"📍 Сейчас слежу за: <b>{symbols or 'ничего не выбрано'}</b>",
+        f"⏱ Свечи по <b>{config.get('timeframe')}</b>, "
+        f"общая картина по <b>{config.get('htf_timeframe')}</b>",
     ]
+
     if data["decided"]:
+        verdict = "неплохо" if data["winrate"] >= 50 else "пока слабо"
         greeting.append(
-            f"📊 Winrate: <b>{data['winrate']}%</b> "
-            f"по {data['decided']} сигналам"
+            f"📊 Из {data['decided']} завершённых сигналов удачных "
+            f"<b>{data['winrate']}%</b> — {verdict}"
         )
+    else:
+        greeting.append(
+            "📊 Статистики пока нет — она появится, когда первые сигналы "
+            "дойдут до цели или стопа"
+        )
+
     if active:
-        greeting.append(f"🎯 Сейчас активно: <b>{active}</b>")
+        greeting.append(f"🎯 Прямо сейчас в работе: <b>{active}</b>")
+
+    greeting += [
+        "",
+        "━━━━━━━━━━━━━━━",
+        "",
+        "<b>Если торгуете впервые</b> — начните с кнопки «❓ Помощь». "
+        "Там всё объяснено простым языком: что такое сигнал, что означает "
+        "каждая строчка в сообщении и сколько вообще стоит рисковать.",
+    ]
 
     if not settings.webapp_enabled:
         greeting.append("")
         greeting.append(
-            "<i>Mini App выключено: чтобы включить, укажите "
+            "<i>Приложение выключено: чтобы включить, укажите "
             "WEBAPP_URL в файле .env</i>"
         )
 
     await message.answer(
         "\n".join(greeting), reply_markup=kb.persistent_menu()
     )
-    await message.answer("Выберите раздел:", reply_markup=kb.main_menu())
+    await message.answer(
+        "Чем займёмся?", reply_markup=kb.main_menu()
+    )
 
 
 @router.message(Command("help"))
