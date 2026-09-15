@@ -73,6 +73,9 @@ read_env() {
 # к api.telegram.org нет, через VPN ходит только докеровская подсеть.
 notify() {
   local text="$1"
+  # NOTIFY=0 глушит сообщения — нужно, чтобы проверять откат на сервере,
+  # не пугая заказчика аварией, которой не было
+  [ "${NOTIFY:-1}" = "1" ] || return 0
   [ -f "$APP_DIR/.env" ] || return 0
 
   local token owners net
