@@ -22,6 +22,13 @@
 
 set -euo pipefail
 
+# Весь код лежит в функции не для красоты: этот скрипт обновляет сам
+# себя. `git reset --hard` ниже переписывает файл, пока файл выполняется,
+# а bash дочитывает его по мере исполнения — и после подмены прочитал бы
+# мусор со старого смещения. Тело функции разбирается целиком до первой
+# команды, поэтому подмена файла на ходу уже ничего не ломает.
+main() {
+
 APP_DIR="${APP_DIR:-/opt/trading-bot}"
 BRANCH="${BRANCH:-main}"
 IMAGE="${IMAGE:-trading-signals-bot}"
@@ -114,6 +121,9 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# Отпечаток самого себя — чтобы заметить, что скрипт обновился
+SELF_HASH="$(sha1sum "$0" | cut -c1-40)"
+
 cd "$APP_DIR" || die "нет каталога $APP_DIR"
 [ -d .git ] || die "$APP_DIR — не git-репозиторий. Разверните через deploy/install-autodeploy.sh"
 
@@ -121,9 +131,38 @@ cd "$APP_DIR" || die "нет каталога $APP_DIR"
 # Есть ли что обновлять
 # --------------------------------------------------------------------------
 
-git fetch --quiet origin "$BRANCH" || die "не удалось получить изменения из origin"
+# Самый неприятный отказ у автообновления — тихий: сервер перестал
+# видеть GitHub, обновления не приезжают, и никто об этом не знает.
+# Считаем неудачи подряд и на пятой (это около десяти минут) пишем
+# в Telegram. Разовый сетевой сбой при этом никого не будит.
+FAIL_FILE="${FAIL_FILE:-/var/lib/trading-bot-deploy.fails}"
+FAILS_BEFORE_ALARM="${FAILS_BEFORE_ALARM:-5}"
 
-PREV_SHA="$(git rev-parse HEAD)"
+if ! git fetch --quiet origin "$BRANCH"; then
+  fails=$(( $(cat "$FAIL_FILE" 2>/dev/null || echo 0) + 1 ))
+  echo "$fails" >"$FAIL_FILE"
+  log "не удалось получить изменения из origin (неудача подряд: $fails)"
+  if [ "$fails" -eq "$FAILS_BEFORE_ALARM" ]; then
+    notify "⚠️ <b>Автообновление не видит GitHub</b>
+
+Уже $fails попытки подряд. Бот работает как работал, но новые версии
+до сервера не доезжают.
+
+Проверить: <code>cd $APP_DIR && git fetch origin $BRANCH</code>"
+  fi
+  exit 1
+fi
+
+# Связь восстановилась — если раньше жаловались, сообщаем и об этом
+if [ -s "$FAIL_FILE" ] && [ "$(cat "$FAIL_FILE")" -ge "$FAILS_BEFORE_ALARM" ]; then
+  notify "✅ <b>Автообновление снова видит GitHub</b>"
+fi
+rm -f "$FAIL_FILE"
+
+# После перезапуска самого себя (см. ниже) HEAD уже равен origin,
+# поэтому исходную точку передаём через окружение — она нужна и чтобы
+# понять, что обновляться есть куда, и чтобы было куда откатываться
+PREV_SHA="${DEPLOY_PREV_SHA:-$(git rev-parse HEAD)}"
 NEXT_SHA="$(git rev-parse "origin/$BRANCH")"
 
 if [ "$PREV_SHA" = "$NEXT_SHA" ] && [ "$FORCE" -eq 0 ]; then
@@ -151,6 +190,15 @@ log "новая версия: $SHORT — $SUBJECT (автор: $AUTHOR)"
 # .env, data/ и logs/ в .gitignore, поэтому reset их не трогает
 git reset --hard --quiet "origin/$BRANCH" || die "не удалось переключиться на новую версию"
 chmod +x deploy/*.sh 2>/dev/null || true
+
+# Если обновился сам скрипт обновления — доигрываем новой версией.
+# Иначе правки в нём применялись бы только со следующего обновления,
+# то есть задним числом.
+if [ "$SELF_HASH" != "$(sha1sum "$0" | cut -c1-40)" ] && [ -z "${DEPLOY_REEXEC:-}" ]; then
+  log "обновился сам автодеплой — доигрываю его новой версией"
+  flock -u 9
+  DEPLOY_REEXEC=1 DEPLOY_PREV_SHA="$PREV_SHA" exec "$0" "$@" --force
+fi
 
 # Копия базы до всего остального: откатить код легко, потерянные
 # настройки и журнал сигналов — нет
@@ -277,3 +325,7 @@ ${CHANGED:+Изменений: $CHANGED}
 
 Обновление прошло само: код собран, тесты пройдены, бот перезапущен.
 Ваши настройки, журнал сигналов и заказанные уведомления на месте."
+
+}
+
+main "$@"
