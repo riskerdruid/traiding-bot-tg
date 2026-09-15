@@ -11,6 +11,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Номер версии приезжает снаружи и становится переменной окружения:
+# бот показывает его в разделе «Состояние», чтобы после автообновления
+# было видно, что именно сейчас работает
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 COPY app ./app
 COPY tools ./tools
 COPY tests ./tests

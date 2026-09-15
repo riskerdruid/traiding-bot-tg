@@ -170,7 +170,9 @@ fi
 log "собираю образ"
 # --network=host обязателен: у сборочной сети docker нет доступа к DNS
 # из-за политики INPUT DROP на этом сервере
-if ! docker build --network=host -t "$IMAGE:candidate" . >>"$LOG_FILE" 2>&1; then
+if ! docker build --network=host \
+     --build-arg "APP_VERSION=$SHORT" \
+     -t "$IMAGE:candidate" . >>"$LOG_FILE" 2>&1; then
   git reset --hard --quiet "$PREV_SHA"
   log "сборка не удалась, вернул код на $PREV_SHA"
   notify "🛑 <b>Обновление не установлено</b>

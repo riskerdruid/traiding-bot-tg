@@ -578,6 +578,9 @@ def create_app() -> FastAPI:
             content={
                 "status": "ok" if ok else "starting",
                 "uptime_sec": int(time.time() - runtime.get("started_at", time.time())),
+                # Версия открыта намеренно: по ней и внешний монитор,
+                # и человек с телефона видят, доехало ли обновление
+                "version": settings.app_version,
             },
         )
 

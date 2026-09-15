@@ -554,12 +554,14 @@ def status_card(
         f"Сканер       {online}",
         f"Биржа        {connected} <i>({health.get('exchange', '?')}, "
         f"{health.get('latency_ms', 0)} мс)</i>",
-        f"Аптайм       {uptime}",
+        f"Работает     {uptime} без перерыва",
         f"Проверок     {scanner_state['scans_done']}",
         f"Последняя    {ago(scanner_state.get('last_scan_at'))}",
         "",
-        f"Таймфрейм    {config.get('timeframe')} (тренд: {config.get('htf_timeframe')})",
-        f"Порог входа  {config.get('min_confidence')}%",
+        f"Свечи по     {config.get('timeframe')} "
+        f"(общая картина: {config.get('htf_timeframe')})",
+        f"Порог        {config.get('min_confidence')}% совпавших признаков",
+        f"Версия       <code>{settings.app_version}</code>",
     ]
 
     if prices:

@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Moscow"
     daily_report_at: str = "21:00"
     log_level: str = "INFO"
+
+    # Номер коммита, из которого собран образ. Проставляется сборкой
+    # (--build-arg APP_VERSION=...), поэтому git внутри контейнера
+    # не нужен. При запуске из исходников остаётся dev.
+    app_version: str = "dev"
     db_path: str = "data/signals.db"
 
     @field_validator("log_level")
