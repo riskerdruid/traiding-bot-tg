@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -60,6 +61,65 @@ def library_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def validate_ssid(raw: str) -> tuple[bool, str]:
+    """Разбирает строку авторизации и объясняет, что с ней не так.
+
+    Нужна, потому что на странице брокера несколько веб-сокетов, и с первого
+    раза почти всегда копируют не тот. Сообщение «missing required field
+    'session'» из библиотеки ничего не объясняет пользователю, а вот
+    «вы скопировали с вкладки кабинета» — объясняет.
+
+    Возвращает (годится ли, пояснение).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return False, "SSID не задан"
+
+    if not text.startswith('42["auth"'):
+        return False, (
+            'Строка должна начинаться с 42["auth". Скопируйте сообщение '
+            "целиком, вместе с началом и закрывающей скобкой."
+        )
+
+    try:
+        parsed = json.loads(text[2:])
+        payload = parsed[1]
+        if not isinstance(payload, dict):
+            raise ValueError
+    except Exception:
+        return False, (
+            "Не удалось разобрать строку. Похоже, она скопирована не полностью "
+            "или с лишними символами."
+        )
+
+    # Самая частая ошибка: сообщение со страницы кабинета вместо терминала
+    if "sessionToken" in payload and "session" not in payload:
+        where = payload.get("currentUrl")
+        hint = f' (в строке указано currentUrl: "{where}")' if where else ""
+        return False, (
+            "Это сообщение со страницы кабинета, а не торгового терминала"
+            f"{hint}. В нём поле sessionToken, а брокеру для котировок нужно "
+            "поле session — оно появляется в сокете на странице с графиком. "
+            "Откройте терминал, обновите страницу и заново поймайте "
+            'сообщение 42["auth".'
+        )
+
+    missing = [k for k in ("session", "uid", "isDemo") if k not in payload]
+    if missing:
+        return False, (
+            f"В строке нет обязательных полей: {', '.join(missing)}. "
+            "Скорее всего, поймано не то сообщение — нужно то, что уходит "
+            "со страницы торгового терминала."
+        )
+
+    session = str(payload.get("session") or "")
+    if not session:
+        return False, "Поле session пустое — сессия не годится."
+
+    account = "демо-счёт" if payload.get("isDemo") else "реальный счёт"
+    return True, f"Похоже на рабочий SSID, {account}."
 
 
 class PocketOptionBroker(BrokerAdapter):
@@ -96,6 +156,10 @@ class PocketOptionBroker(BrokerAdapter):
                 "Не задан SSID Pocket Option. Откройте платформу в браузере, "
                 "войдите в аккаунт и скопируйте SSID сессии в настройках бота."
             )
+
+        ok, reason = validate_ssid(self.ssid)
+        if not ok:
+            raise BrokerError(f"SSID не подходит. {reason}")
         if not library_available():
             raise BrokerError(
                 "Не установлен пакет BinaryOptionsToolsV2. "
@@ -112,11 +176,31 @@ class PocketOptionBroker(BrokerAdapter):
                 config = Config(connection_initialization_timeout_secs=25)
                 api = PocketOptionAsync(self.ssid, config=config)
                 await api.connect()
+
+                # Сокет открывается даже с непринятой сессией — брокер просто
+                # не присылает данные. Настоящий признак авторизации в том,
+                # что пришёл каталог активов.
+                try:
+                    await asyncio.wait_for(api.wait_for_assets(timeout=25), timeout=30)
+                except Exception:
+                    try:
+                        await api.shutdown()
+                    except Exception:
+                        pass
+                    raise BrokerError(
+                        "Брокер принял соединение, но не авторизовал сессию: "
+                        "каталог активов не пришёл. Обычно это значит, что SSID "
+                        "устарел или скопирован со страницы кабинета вместо "
+                        "торгового терминала."
+                    ) from None
+
                 self._api = api
                 self._connected = True
                 self.last_error = None
+                # is_demo/is_connected — обычные функции, не корутины:
+                # await на них всегда падал бы в TypeError
                 try:
-                    self._is_demo = bool(await api.is_demo())
+                    self._is_demo = bool(api.is_demo())
                 except Exception:
                     self._is_demo = None
                 log.info(

@@ -356,6 +356,16 @@ class RuntimeConfig:
         if key == "symbols" and not value:
             raise ValidationError("Нужен хотя бы один инструмент")
 
+        if key == "po_ssid" and value:
+            # Пустое значение означает «оставить как было», а вот непустое
+            # проверяем сразу: иначе ошибка всплывёт только при первом
+            # обращении к брокеру, и связать её с настройкой будет трудно.
+            from app.market.pocketoption import validate_ssid
+
+            ok, reason = validate_ssid(str(value))
+            if not ok:
+                raise ValidationError(reason)
+
     # ----------------------------------------------------------------
 
     def schema(self) -> list[dict]:

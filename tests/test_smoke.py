@@ -666,9 +666,47 @@ async def test_brokers_and_binary() -> None:
     )
 
     # Библиотека брокера ставится опционально
-    from app.market.pocketoption import library_available
+    from app.market.pocketoption import library_available, validate_ssid
 
     check("наличие библиотеки определяется", isinstance(library_available(), bool))
+
+    # Разбор строки авторизации брокера
+    cabinet = ('42["auth",{"sessionToken":"aaaa","uid":"1","lang":"ru",'
+               '"currentUrl":"cabinet","isChart":1}]')
+    terminal = '42["auth",{"session":"aaaa","isDemo":1,"uid":"1","platform":2}]'
+    real = '42["auth",{"session":"aaaa","isDemo":0,"uid":"1","platform":2}]'
+
+    ok, why = validate_ssid(cabinet)
+    check("строка из кабинета отклоняется", not ok)
+    check("и объясняет причину", "кабинет" in why.lower(), why[:60])
+
+    ok, why = validate_ssid(terminal)
+    check("строка из терминала принимается", ok, why)
+    check("определяется демо-счёт", "демо" in why, why)
+
+    ok, why = validate_ssid(real)
+    check("определяется реальный счёт", ok and "реальный" in why, why)
+
+    check("пустая строка отклоняется", not validate_ssid("")[0])
+    check("обрывок отклоняется", not validate_ssid('{"session":"x"}')[0])
+    check("мусор отклоняется", not validate_ssid('42["auth",сломано]')[0])
+    check(
+        "без обязательных полей отклоняется",
+        not validate_ssid('42["auth",{"session":"a"}]')[0],
+    )
+
+    # Настройка не даст сохранить заведомо негодный токен
+    from app.storage.settings_store import ValidationError as VErr
+    from app.storage.settings_store import config as cfg2
+
+    try:
+        await cfg2.set("po_ssid", cabinet)
+        check("негодный SSID не сохраняется", False, "принят")
+    except VErr:
+        check("негодный SSID не сохраняется", True)
+    await cfg2.set("po_ssid", terminal)
+    check("годный SSID сохраняется", bool(cfg2.get("po_ssid")))
+    await cfg2.reset("po_ssid")
 
     # Ограничители: часы работы и дневной лимит
     from app.engine.scanner import Scanner
