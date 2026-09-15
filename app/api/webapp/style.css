@@ -951,3 +951,11 @@ main { padding: 0 var(--pad) 20px; }
   background: color-mix(in srgb, var(--amber) 12%, transparent);
   border-left: 3px solid color-mix(in srgb, var(--amber) 60%, transparent);
 }
+
+/* Кнопки счётчика удерживают — не даём браузеру выделять текст
+   и показывать меню долгого нажатия */
+.step-btn {
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}

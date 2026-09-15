@@ -1141,17 +1141,51 @@
 
     // Числовые поля со степперами
     document.querySelectorAll('.step-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        const key = btn.dataset.key;
+      const key = btn.dataset.key;
+      const dir = parseInt(btn.dataset.dir, 10);
+      let timer = null;
+      let ticks = 0;
+
+      function bump() {
         const input = document.getElementById('f-' + key);
+        if (!input) return;
         const step = parseFloat(input.dataset.step) || 1;
-        const dir = parseInt(btn.dataset.dir, 10);
+        // Разгон при удержании: сначала по шагу, потом крупнее.
+        // Иначе докрутить от 0 до 240 по одной минуте невозможно.
+        const factor = ticks > 25 ? 25 : (ticks > 8 ? 5 : 1);
         const current = parseFloat(String(input.value).replace(',', '.')) || 0;
-        const next = Math.round((current + step * dir) * 1000) / 1000;
+        const next = Math.round((current + step * factor * dir) * 1000) / 1000;
         input.value = String(next);
+        ticks += 1;
+      }
+
+      function start(event) {
+        event.preventDefault();
+        ticks = 0;
+        bump();
         haptic('light');
-        commitNumber(key, input);
-      });
+        // Первое повторение с задержкой, чтобы одиночное нажатие
+        // не превращалось в серию
+        timer = setTimeout(function () {
+          timer = setInterval(bump, 90);
+        }, 450);
+      }
+
+      function stop() {
+        if (timer === null) return;
+        clearTimeout(timer);
+        clearInterval(timer);
+        timer = null;
+        const input = document.getElementById('f-' + key);
+        if (input) commitNumber(key, input);
+      }
+
+      btn.addEventListener('pointerdown', start);
+      btn.addEventListener('pointerup', stop);
+      btn.addEventListener('pointerleave', stop);
+      btn.addEventListener('pointercancel', stop);
+      // Чтобы палец не «уезжал» и не превращал удержание в прокрутку
+      btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     });
     document.querySelectorAll('.step-input, .text-input:not(.secret-input)').forEach(function (input) {
       input.addEventListener('change', function () { commitNumber(input.dataset.key, input); });
