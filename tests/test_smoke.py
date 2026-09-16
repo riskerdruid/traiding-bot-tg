@@ -647,6 +647,53 @@ async def test_alerts() -> None:
     check("снять все разом", left == 2, f"={left}")
     check("после уборки пусто", not await repo.list_alerts(owner_id=uid))
 
+
+    # --- сторож: от заказанного уровня до сообщения человеку ---
+    from app.engine.alerts import AlertWatcher
+    from app.market.feed import feed as market
+
+    watcher = AlertWatcher()
+    delivered: list = []
+
+    async def on_hit(alert, price):
+        delivered.append((alert.id, price))
+
+    watcher.on_hit = on_hit
+
+    waiting = await repo.create_alert(
+        owner_id=uid, symbol="BTC/USDT:USDT", price=95000.0, start_price=90000.0,
+    )
+    far = await repo.create_alert(
+        owner_id=uid, symbol="BTC/USDT:USDT", price=200000.0, start_price=90000.0,
+    )
+
+    async def cheap(symbols):
+        return {s: 94000.0 for s in symbols}
+
+    async def expensive(symbols):
+        return {s: 95500.0 for s in symbols}
+
+    real = market.fetch_prices
+    try:
+        market.fetch_prices = cheap
+        fired = await watcher.check_once()
+        check("до уровня не дошло — молчим", not fired and not delivered)
+        check("но сторож считает, за чем следит", watcher.watching == 2, str(watcher.watching))
+
+        market.fetch_prices = expensive
+        fired = await watcher.check_once()
+        check("уровень сработал", len(fired) == 1 and fired[0].id == waiting.id, str(fired))
+        check("человеку отправлено", delivered == [(waiting.id, 95500.0)], str(delivered))
+
+        fired = await watcher.check_once()
+        check("второй раз то же самое не шлём", not fired, str(fired))
+        check("далёкий уровень остался ждать", far.id in {
+            a.id for a in await repo.list_alerts(owner_id=uid)
+        })
+    finally:
+        market.fetch_prices = real
+    await repo.cancel_all_alerts(uid)
+
     # --- тексты ---
     sample = await repo.create_alert(
         owner_id=42, symbol="BTC/USDT:USDT", price=95000.0, start_price=90000.0,
