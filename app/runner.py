@@ -1,4 +1,4 @@
-"""Запуск всего приложения: бот, сканер, трекер и веб-сервер в одном процессе.
+"""Запуск приложения: бот, сканер и трекер в одном процессе.
 
 Один процесс выбран сознательно: компонентов немного, они делят одну базу
 и один клиент биржи, а разносить их по сервисам означало бы усложнить
@@ -14,16 +14,14 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
-import uvicorn
 from aiogram.exceptions import TelegramUnauthorizedError
 
-from app.api import server as api_server
 from app.bot import handlers as bot_handlers
 from app.bot.instance import create_bot, create_dispatcher, setup_bot_profile
 from app.bot.notifier import Notifier
 from app.config import settings
-from app.engine.alerts import AlertWatcher
 from app.engine.scanner import Scanner
 from app.engine.tracker import Tracker
 from app.logging_conf import setup_logging
@@ -33,6 +31,10 @@ from app.storage.db import db
 from app.storage.settings_store import config
 
 log = logging.getLogger("runner")
+
+# Как часто обновлять файл-отметку «я жив». По его возрасту docker
+# понимает, что процесс не завис.
+HEARTBEAT_INTERVAL = 30
 
 
 class StartupError(Exception):
@@ -55,8 +57,6 @@ class Application:
         self.notifier: Notifier | None = None
         self.scanner: Scanner | None = None
         self.tracker: Tracker | None = None
-        self.alerts: AlertWatcher | None = None
-        self.api: uvicorn.Server | None = None
         self.tasks: list[asyncio.Task] = []
         self.started_at = time.time()
         self._stopping = False
@@ -87,12 +87,14 @@ class Application:
     async def setup(self) -> None:
         await db.init()
         await config.load()
+        # Ключ брокера мог быть прислан в бот и лежать в базе — подхватываем
+        # его до первого прохода, иначе экран «За чем следить» первые минуты
+        # показывал бы опционы недоступными
+        feed.apply_settings(pocket_ssid=str(config.get("po_ssid") or ""))
         log.info(
-            "Настройки загружены: %s, ТФ %s/%s, порог %s%%",
+            "Настройки загружены: %s, режим «%s»",
             ", ".join(config.get("symbols") or []),
-            config.get("timeframe"),
-            config.get("htf_timeframe"),
-            config.get("min_confidence"),
+            config.preset().name,
         )
 
         self.bot = create_bot()
@@ -101,20 +103,15 @@ class Application:
 
         self.scanner = Scanner(on_signal=self.notifier.send_signal)
         self.tracker = Tracker(on_outcome=self.notifier.send_outcome)
-        # Уровни, заказанные человеком вручную, живут отдельно от сигналов:
-        # следить приходится и за теми инструментами, которых нет в списке
-        self.alerts = AlertWatcher(on_hit=self.notifier.send_price_alert)
 
-        # Пробрасываем живые компоненты в обработчики бота и в API
-        shared = {
-            "scanner": self.scanner,
-            "tracker": self.tracker,
-            "alerts": self.alerts,
-            "started_at": self.started_at,
-            "notifier": self.notifier,
-        }
-        bot_handlers.runtime.update(shared)
-        api_server.runtime.update(shared)
+        bot_handlers.runtime.update(
+            {
+                "scanner": self.scanner,
+                "tracker": self.tracker,
+                "notifier": self.notifier,
+                "started_at": self.started_at,
+            }
+        )
 
         try:
             me = await self.bot.get_me()
@@ -135,50 +132,29 @@ class Application:
         await setup_bot_profile(self.bot)
 
     # ----------------------------------------------------------------
-    # Компоненты
+    # Фоновые задачи
     # ----------------------------------------------------------------
 
-    async def _run_api(self) -> None:
-        # Имя намеренно не `config` — так называются живые настройки,
-        # импортированные выше, и затенять их здесь опасно
-        uvicorn_config = uvicorn.Config(
-            api_server.create_app(),
-            host=settings.api_host,
-            port=settings.api_port,
-            log_level="warning",
-            access_log=False,
-        )
-        self.api = uvicorn.Server(uvicorn_config)
-        # Uvicorn по умолчанию перехватывает сигналы — здесь это мешает,
-        # завершением управляет Application
-        self.api.install_signal_handlers = lambda: None
-        log.info(
-            "Веб-сервер на http://%s:%d %s",
-            settings.api_host,
-            settings.api_port,
-            f"(Mini App: {settings.webapp_url})" if settings.webapp_enabled else "",
-        )
-        await self.api.serve()
+    async def _run_heartbeat(self) -> None:
+        """Обновляет файл-отметку, пока цикл событий жив."""
+        path = Path(settings.heartbeat_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while not self._stopping:
+            with contextlib.suppress(Exception):
+                path.write_text(str(int(time.time())), encoding="utf-8")
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _run_daily_report(self) -> None:
-        """Отправляет сводку в заданное заказчиком время.
-
-        Время перечитывается на каждой итерации, поэтому смена в приложении
-        применяется в тот же день, без перезапуска.
-        """
+        """Отправляет сводку в заданное время."""
         sent_on: str | None = None
-        while not self._stopping:
-            raw = str(config.get("daily_report_at") or "").strip()
-            if not raw or not config.get("daily_report"):
-                await asyncio.sleep(45)
-                continue
-            try:
-                hour, minute = (int(x) for x in raw.split(":"))
-            except ValueError:
-                log.warning("Время сводки '%s' не в формате ЧЧ:ММ — пропускаю", raw)
-                await asyncio.sleep(300)
-                continue
+        raw = str(settings.daily_report_at or "").strip()
+        try:
+            hour, minute = (int(x) for x in raw.split(":"))
+        except ValueError:
+            log.warning("DAILY_REPORT_AT='%s' не в формате ЧЧ:ММ — сводка выключена", raw)
+            return
 
+        while not self._stopping:
             now = datetime.now(settings.tz)
             today = now.strftime("%Y-%m-%d")
             if now.hour == hour and now.minute >= minute and sent_on != today:
@@ -205,10 +181,9 @@ class Application:
         await self.setup()
 
         self.tasks = [
-            asyncio.create_task(self._run_api(), name="api"),
             self.scanner.start(),
             self.tracker.start(),
-            self.alerts.start(),
+            asyncio.create_task(self._run_heartbeat(), name="heartbeat"),
             asyncio.create_task(self._run_daily_report(), name="daily"),
             asyncio.create_task(self._run_housekeeping(), name="housekeeping"),
         ]
@@ -236,15 +211,10 @@ class Application:
             await self.scanner.stop()
         if self.tracker:
             await self.tracker.stop()
-        if self.alerts:
-            await self.alerts.stop()
 
         if self.dispatcher:
             with contextlib.suppress(Exception):
                 await self.dispatcher.stop_polling()
-
-        if self.api:
-            self.api.should_exit = True
 
         for task in self.tasks:
             task.cancel()

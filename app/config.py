@@ -1,12 +1,17 @@
-"""Конфигурация приложения. Все значения читаются из .env."""
+"""Конфигурация установки. Читается из .env один раз при старте.
+
+Здесь только то, что задаёт инженер при развёртывании: токен бота, кому
+слать сигналы, через какую биржу смотреть рынок. Всё, что пользователь
+меняет сам из Telegram, лежит в app/storage/settings_store.py.
+"""
 
 from __future__ import annotations
 
-from functools import lru_cache
 from datetime import timezone as _dt_timezone
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,24 +30,24 @@ class Settings(BaseSettings):
     # --- Telegram ---
     bot_token: str = ""
     owner_ids: str = ""
-    webapp_url: str = ""
-    domain: str = ""
 
     # --- Рынок ---
     exchange: str = "okx"
     symbols: str = "XAU/USDT:USDT"
-    timeframe: str = "15m"
-    htf_timeframe: str = "1h"
-    scan_interval: int = 60
     exchange_proxy: str = ""
 
     # --- Pocket Option (бинарные опционы) ---
     po_ssid: str = ""
     po_expiry_min: int = 5
     po_min_payout: float = 70
-    po_otc_only: bool = False
 
     # --- Стратегия ---
+    # Пользователь не выставляет эти числа руками: их задаёт выбранный
+    # режим работы (см. PRESETS). Здесь — стартовые значения на первый
+    # запуск с пустой базой.
+    timeframe: str = "15m"
+    htf_timeframe: str = "1h"
+    scan_interval: int = 60
     ema_fast: int = 9
     ema_slow: int = 21
     ema_trend: int = 50
@@ -58,33 +63,23 @@ class Settings(BaseSettings):
     atr_sl_mult: float = 1.5
     risk_reward: float = 1.8
     min_confidence: int = 60
-    max_signals_per_day: int = 0
-    trade_hours: str = ""
+    max_signals_per_day: int = 10
     require_htf_agree: bool = True
     require_volume: bool = False
     signal_ttl_min: int = 240
     cooldown_min: int = 45
 
-    # --- Новости ---
-    news_filter_enabled: bool = True
-    news_mute_before_min: int = 30
-    news_mute_after_min: int = 15
-    news_currencies: str = "USD"
-    news_impact: str = "High"
-
-    # --- Сервер ---
-    webapp_dev_mode: bool = False
-    api_host: str = "0.0.0.0"
-    api_port: int = 8080
+    # --- Система ---
     timezone: str = "Europe/Moscow"
     daily_report_at: str = "21:00"
     log_level: str = "INFO"
 
     # Номер коммита, из которого собран образ. Проставляется сборкой
-    # (--build-arg APP_VERSION=...), поэтому git внутри контейнера
-    # не нужен. При запуске из исходников остаётся dev.
+    # (--build-arg APP_VERSION=...), поэтому git внутри контейнера не нужен.
     app_version: str = "dev"
     db_path: str = "data/signals.db"
+    # Файл-отметка «я жив»: по нему docker понимает, что процесс не завис.
+    heartbeat_path: str = "data/heartbeat"
 
     @field_validator("log_level")
     @classmethod
@@ -108,24 +103,12 @@ class Settings(BaseSettings):
         return _split(self.symbols)
 
     @property
-    def news_currency_list(self) -> list[str]:
-        return [c.upper() for c in _split(self.news_currencies)]
-
-    @property
-    def news_impact_list(self) -> list[str]:
-        return [i.capitalize() for i in _split(self.news_impact)]
-
-    @property
     def tz(self):
         """Часовой пояс отчётов. На системах без tzdata молча падаем в UTC."""
         try:
             return ZoneInfo(self.timezone)
         except Exception:
             return _dt_timezone.utc
-
-    @property
-    def webapp_enabled(self) -> bool:
-        return self.webapp_url.startswith("https://")
 
     def validate_runtime(self) -> list[str]:
         """Возвращает список проблем, из-за которых бот не сможет работать."""
@@ -138,8 +121,6 @@ class Settings(BaseSettings):
             problems.append(
                 "OWNER_IDS не задан. Узнайте свой id у @userinfobot и впишите его в .env"
             )
-        if not self.symbol_list:
-            problems.append("SYMBOLS пуст — нечего анализировать")
         return problems
 
 

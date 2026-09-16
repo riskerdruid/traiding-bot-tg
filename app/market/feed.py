@@ -78,7 +78,9 @@ class MarketRouter:
 
     def __init__(self) -> None:
         self._exchange = CcxtBroker()
-        self._pocket = PocketOptionBroker()
+        # Ключ из .env — стартовый. Тот, что человек прислал боту, лежит
+        # в базе и заменит этот при первом же чтении настроек.
+        self._pocket = PocketOptionBroker(settings.po_ssid)
         self.last_error: str | None = None
 
     # ----------------------------------------------------------------
@@ -241,7 +243,7 @@ class MarketRouter:
         return await self._exchange.health()
 
     async def health_all(self) -> list[dict]:
-        """Состояние всех площадок для Mini App."""
+        """Состояние всех площадок."""
         out = [await self._exchange.health()]
         if self._pocket.configured or self._pocket._assets:
             out.append(await self._pocket.health())

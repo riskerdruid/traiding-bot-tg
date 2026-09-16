@@ -10,6 +10,10 @@
 Источник — недельный JSON-фид Forex Factory. Он публичный и не требует ключа.
 Данные кешируются в базе, так что сеть опрашивается раз в час, а при недоступности
 источника используется последний успешный снимок.
+
+Настройками фильтр не управляется намеренно: «за сколько минут до новости
+замолчать» — вопрос, на который новичку нечего ответить, а ошибка в нём
+портит статистику незаметно. Значения ниже подходят всем.
 """
 
 from __future__ import annotations
@@ -21,15 +25,21 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.config import settings
 from app.storage.db import db
-from app.storage.settings_store import config
 
 log = logging.getLogger("news.calendar")
 
 FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 REFRESH_INTERVAL = 3600  # раз в час
 USER_AGENT = "Mozilla/5.0 (compatible; TradingSignalsBot/1.0)"
+
+# Молчим только вокруг событий, которые реально двигают цену: решения
+# по ставкам, инфляция, занятость. Всё остальное — шум, из-за которого
+# бот молчал бы полдня.
+IMPACTS = ("High",)
+CURRENCIES = ("USD", "EUR")
+MUTE_BEFORE_MIN = 30  # рынок начинает нервничать заранее
+MUTE_AFTER_MIN = 15   # и успокаивается не сразу
 
 
 @dataclass(slots=True)
@@ -169,59 +179,28 @@ class EconomicCalendar:
     # Запросы
     # ----------------------------------------------------------------
 
-    def _relevant(self, event: NewsEvent, cfg=None) -> bool:
-        """Событие влияет на наши инструменты?
-
-        Какие новости учитывать — личная настройка, поэтому источник
-        передаётся аргументом.
-        """
-        cfg = cfg or config
-        if event.impact not in [i.strip().capitalize() for i in str(cfg.get("news_impact") or "High").split(",") if i.strip()]:
+    def _relevant(self, event: NewsEvent) -> bool:
+        """Событие влияет на наши инструменты?"""
+        if event.impact not in IMPACTS:
             return False
-        currencies = [c.strip().upper() for c in str(cfg.get("news_currencies") or "USD").split(",") if c.strip()]
-        if not currencies:
-            return True
-        return event.currency in currencies or event.currency == "ALL"
+        return event.currency in CURRENCIES or event.currency == "ALL"
 
-    def mute_reason(self, cfg=None, now: int | None = None) -> NewsEvent | None:
-        """Возвращает событие, из-за которого сейчас нельзя выдавать сигналы."""
-        cfg = cfg or config
-        if not cfg.get("news_filter_enabled"):
-            return None
-
+    def mute_reason(self, now: int | None = None) -> NewsEvent | None:
+        """Событие, из-за которого сейчас нельзя выдавать сигналы."""
         now = now or int(time.time())
-        before = cfg.get("news_mute_before_min")
-        after = cfg.get("news_mute_after_min")
-
         for event in self._events:
-            if not self._relevant(event, cfg):
+            if not self._relevant(event):
                 continue
             minutes = event.minutes_from(now)
-            if -after <= minutes <= before:
+            if -MUTE_AFTER_MIN <= minutes <= MUTE_BEFORE_MIN:
                 return event
         return None
 
-    def upcoming(self, limit: int = 5, only_relevant: bool = True, cfg=None) -> list[NewsEvent]:
-        """Ближайшие события — для /news и Mini App."""
+    def upcoming(self, limit: int = 5) -> list[NewsEvent]:
+        """Ближайшие важные события."""
         now = int(time.time())
-        out = [
-            e
-            for e in self._events
-            if e.event_at > now and (not only_relevant or self._relevant(e, cfg))
-        ]
+        out = [e for e in self._events if e.event_at > now and self._relevant(e)]
         return out[:limit]
-
-    def today(self, only_relevant: bool = True, cfg=None) -> list[NewsEvent]:
-        """События сегодняшнего дня в часовом поясе отчётов."""
-        now_local = datetime.now(settings.tz)
-        start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start.timestamp() + 86400
-        return [
-            e
-            for e in self._events
-            if start.timestamp() <= e.event_at < end
-            and (not only_relevant or self._relevant(e, cfg))
-        ]
 
     @property
     def loaded(self) -> int:

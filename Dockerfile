@@ -12,7 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Номер версии приезжает снаружи и становится переменной окружения:
-# бот показывает его в разделе «Состояние», чтобы после автообновления
+# бот показывает его в ответе на /test, чтобы после автообновления
 # было видно, что именно сейчас работает
 ARG APP_VERSION=dev
 ENV APP_VERSION=$APP_VERSION
@@ -25,11 +25,10 @@ COPY run.py .
 # База и логи живут в томах, чтобы переживать пересборку образа
 RUN mkdir -p /app/data /app/logs
 
-# Бот сам говорит, здоров ли он
-HEALTHCHECK --interval=60s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request,sys; \
-        sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5).status==200 else 1)"
-
-EXPOSE 8080
+# Бот раз в полминуты обновляет файл-отметку. Если она старше трёх минут,
+# процесс жив, но цикл событий встал — контейнер надо перезапускать.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import os,sys,time; p='/app/data/heartbeat'; \
+        sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"
 
 CMD ["python", "run.py"]

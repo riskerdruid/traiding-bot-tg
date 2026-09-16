@@ -81,28 +81,6 @@ CREATE TABLE IF NOT EXISTS news_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_at ON news_cache(event_at);
-
--- Уведомления по цене: человек сам называет уровень, бот сообщает,
--- когда рынок до него дошёл. К сигналам отношения не имеет — это
--- просто будильник.
-CREATE TABLE IF NOT EXISTS alerts (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_id     INTEGER NOT NULL,
-    symbol       TEXT    NOT NULL,
-    price        REAL    NOT NULL,       -- уровень, о котором просили сообщить
-    direction    TEXT    NOT NULL,       -- up | down: с какой стороны подходим
-    start_price  REAL,                   -- цена в момент заказа, для сравнения
-    note         TEXT    NOT NULL DEFAULT '',
-    percent      REAL,                   -- если уровень задан движением в %
-    repeat       INTEGER NOT NULL DEFAULT 0,  -- 1 — не гасить после срабатывания
-    status       TEXT    NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE|DONE|CANCELLED
-    created_at   INTEGER NOT NULL,
-    triggered_at INTEGER,
-    hit_price    REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_alerts_owner  ON alerts(owner_id, status);
-CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol, status);
 """
 
 # Дополнения к уже существующим базам. Выполняются по одному,
@@ -117,8 +95,6 @@ _MIGRATIONS: list[str] = [
     # У каждого получателя свой журнал: настройки, а значит и сигналы, разные
     "ALTER TABLE signals ADD COLUMN owner_id INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_signals_owner ON signals(owner_id)",
-    # Уведомление можно заказать не только по цене, но и по движению в %
-    "ALTER TABLE alerts ADD COLUMN percent REAL",
 ]
 
 
@@ -132,7 +108,7 @@ class Database:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = await aiosqlite.connect(self.path)
             self._conn.row_factory = aiosqlite.Row
-            # WAL позволяет читать из Mini App, пока сканер пишет
+            # WAL: чтение из бота не ждёт, пока сканер допишет
             await self._conn.execute("PRAGMA journal_mode=WAL")
             await self._conn.execute("PRAGMA synchronous=NORMAL")
             await self._conn.execute("PRAGMA foreign_keys=ON")

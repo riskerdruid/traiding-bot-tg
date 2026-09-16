@@ -102,7 +102,7 @@ class CcxtBroker(BrokerAdapter):
         return ok, missing
 
     async def list_symbols(self, active_only: bool = True) -> list[SymbolInfo]:
-        """Все торгуемые инструменты биржи — для выбора пар в приложении."""
+        """Все торгуемые инструменты биржи — для выбора пар в боте."""
         await self.ensure_markets()
         markets = self.exchange.markets or {}
         out: list[SymbolInfo] = []
@@ -239,7 +239,7 @@ class CcxtBroker(BrokerAdapter):
         return out
 
     async def health(self) -> dict:
-        """Состояние подключения — для /status и Mini App."""
+        """Состояние подключения — для экрана сигналов."""
         started = time.time()
         try:
             await self.ensure_markets()

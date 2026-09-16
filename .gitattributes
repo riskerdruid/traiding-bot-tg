@@ -7,4 +7,3 @@
 *.png binary
 *.jpg binary
 *.exe binary
-app/api/webapp/vendor/* -text

@@ -109,6 +109,15 @@ class Scanner:
                 place, reason, ", ".join(items),
             )
 
+    def invalidate(self) -> None:
+        """Забыть проверенный список инструментов.
+
+        Нужно после смены ключа брокера: пары, отвергнутые при старте
+        из-за протухшего ключа, иначе остались бы недоступными до
+        перезапуска — а человек уже прислал новый ключ и ждёт сигналов.
+        """
+        self._by_owner = {}
+
     def start(self) -> asyncio.Task:
         self.running = True
         self._task = asyncio.create_task(self._loop(), name="scanner")
@@ -144,12 +153,12 @@ class Scanner:
 
     async def scan_once(self) -> list[repo.Signal]:
         """Один полный проход по всем инструментам."""
-        # Перечитываем настройки — заказчик мог поменять их из приложения
+        # Перечитываем настройки — их могли поменять в боте
         # минуту назад, и они должны примениться без перезапуска.
         previous_symbols = self._all_symbols()
         previous_ssid = feed.pocket_broker.ssid
         await config.load()
-        # SSID брокера мог измениться в приложении — подхватываем без перезапуска
+        # SSID брокера мог измениться в боте — подхватываем без перезапуска
         feed.apply_settings(pocket_ssid=str(config.get("po_ssid") or ""))
 
         if self._all_symbols() != previous_symbols:
@@ -170,15 +179,30 @@ class Scanner:
 
         created: list[repo.Signal] = []
 
-        # Каждый получатель разбирается отдельно: у него свои часы работы,
-        # свой дневной лимит и свои настройки фильтра новостей
+        # Тишина вокруг важной новости одна на всех: цену в эти минуты
+        # двигает статистика, а не график, и техническому сигналу там
+        # взяться неоткуда
+        muted_by = calendar.mute_reason()
+        if muted_by is not None:
+            minutes = muted_by.minutes_from()
+            when = (
+                f"через {minutes:.0f} мин" if minutes > 0
+                else f"{-minutes:.0f} мин назад"
+            )
+            log.info("Тишина из-за новости %s (%s)", muted_by.title, when)
+            # Проход всё равно состоялся: иначе на экране сигналов
+            # застыло бы «рынок проверен час назад», и человек решил бы,
+            # что бот умер, хотя он молчит намеренно
+            self.last_scan_at = int(time.time())
+            self.scans_done += 1
+            return []
+
+        # Каждый получатель разбирается отдельно: у него свой список
+        # инструментов и свой дневной лимит
         for owner_id, symbols in self._by_owner.items():
             if not symbols:
                 continue
             cfg = config.view(owner_id)
-
-            if not self._within_trade_hours(cfg):
-                continue
 
             limit = int(cfg.get("max_signals_per_day") or 0)
             if limit > 0:
@@ -193,19 +217,6 @@ class Scanner:
                         "Получатель %s: дневной лимит исчерпан (%d)", owner_id, limit
                     )
                     continue
-
-            muted_by = calendar.mute_reason(cfg)
-            if muted_by is not None:
-                minutes = muted_by.minutes_from()
-                when = (
-                    f"через {minutes:.0f} мин" if minutes > 0
-                    else f"{-minutes:.0f} мин назад"
-                )
-                log.info(
-                    "Получатель %s: тишина из-за новости %s (%s)",
-                    owner_id, muted_by.title, when,
-                )
-                continue
 
             for symbol in symbols:
                 try:
@@ -336,26 +347,8 @@ class Scanner:
 
         return signal
 
-    def _within_trade_hours(self, cfg=None) -> bool:
-        """Попадает ли текущее время в заданное окно работы."""
-        source = cfg or config
-        window = str(source.get("trade_hours") or "").strip()
-        if not window or "-" not in window:
-            return True
-        try:
-            start, end = (p.strip() for p in window.split("-", 1))
-            now_hm = datetime.now(settings.tz).strftime("%H:%M")
-            if start == end:
-                return True
-            if start < end:
-                return start <= now_hm < end
-            # Окно через полночь, например 22:00-06:00
-            return now_hm >= start or now_hm < end
-        except Exception:
-            return True
-
     # ----------------------------------------------------------------
-    # Состояние для /status и Mini App
+    # Состояние для экрана сигналов
     # ----------------------------------------------------------------
 
     def _all_symbols(self) -> list[str]:
@@ -366,21 +359,17 @@ class Scanner:
         return sorted(out)
 
     def state(self, owner_id: int | None = None) -> dict:
-        cfg = config.view(owner_id) if owner_id else config
-        muted = calendar.mute_reason(cfg)
         symbols = (
             self._by_owner.get(owner_id, [])
             if owner_id
             else sorted({s for v in self._by_owner.values() for s in v})
         )
+        muted = calendar.mute_reason()
         return {
             "running": self.running,
             "symbols": symbols,
             "last_scan_at": self.last_scan_at,
             "scans_done": self.scans_done,
             "last_error": self.last_error,
-            "muted_by_news": muted.to_dict() if muted else None,
-            "within_hours": self._within_trade_hours(cfg),
-            "trade_hours": str(cfg.get("trade_hours") or ""),
-            "news_loaded": calendar.loaded,
+            "muted_by_news": muted.title if muted else None,
         }

@@ -10,14 +10,14 @@
    Это защита от входов в боковике, где трендовая логика systematically теряет.
 
 2. ПОДТВЕРЖДЕНИЯ (confirmations) — каждое добавляет уверенности.
-   Сумма даёт confidence 0..100. Порог задаётся заказчиком в Mini App.
+   Сумма даёт confidence 0..100. Порог задаёт выбранный режим работы.
 
 Стоп ставится по ATR — то есть по реальной волатильности инструмента,
 а не фиксированным числом пунктов. Тейк рассчитывается от стопа через
 заданное соотношение риск/прибыль.
 
 Все числовые параметры читаются из живых настроек (app/storage/settings_store),
-поэтому заказчик меняет их прямо в приложении, без перезапуска.
+поэтому смена режима работы применяется без перезапуска.
 """
 
 from __future__ import annotations
@@ -131,37 +131,44 @@ class TrendMomentumStrategy(Strategy):
         confidence = BASE_CONFIDENCE
         reasons: list[str] = []
 
-        arrow = "снизу вверх" if side == LONG else "сверху вниз"
+        # Причины читает человек, который слышит слово «индикатор» впервые.
+        # Поэтому здесь не названия формул, а то, что они означают: сами
+        # числа лежат рядом, в indicators_snapshot, и нужны только разбору
+        # постфактум.
         reasons.append(
-            f"EMA{cfg.get('ema_fast')} пересекла EMA{cfg.get('ema_slow')} {arrow}"
+            "Цена развернулась вверх" if side == LONG else "Цена развернулась вниз"
         )
-        reasons.append(f"ADX {adx_now:.0f} — тренд подтверждён")
+        reasons.append("Движение уверенное, а не топтание на месте")
 
         if htf_bias == ("BULL" if side == LONG else "BEAR"):
             confidence += 15
-            reasons.append(f"Старший ТФ {cfg.get('htf_timeframe')} в том же направлении")
+            reasons.append("На крупном графике рынок идёт туда же")
 
         if (side == LONG and price > trend_now) or (side == SHORT and price < trend_now):
             confidence += 10
             above = "выше" if side == LONG else "ниже"
-            reasons.append(f"Цена {above} EMA{cfg.get('ema_trend')}")
+            reasons.append(f"Цена {above} своего среднего уровня")
 
         if pdi_now is not None and mdi_now is not None:
             if (side == LONG and pdi_now > mdi_now) or (
                 side == SHORT and mdi_now > pdi_now
             ):
                 confidence += 10
-                reasons.append(f"+DI/-DI подтверждают ({pdi_now:.0f}/{mdi_now:.0f})")
+                reasons.append(
+                    "Покупатели сильнее продавцов"
+                    if side == LONG
+                    else "Продавцы сильнее покупателей"
+                )
 
         if hist_now is not None:
             if (side == LONG and hist_now > 0) or (side == SHORT and hist_now < 0):
                 confidence += 12
-                reasons.append("Гистограмма MACD на стороне сигнала")
+                reasons.append("Движение набирает ход")
 
         adx_slope = ind.slope(adx_line, 3)
         if adx_slope is not None and adx_slope > 0:
             confidence += 8
-            reasons.append("Сила тренда нарастает")
+            reasons.append("Сила движения растёт")
 
         if stoch_now is not None:
             overheated = (side == LONG and stoch_now > 85) or (
@@ -171,7 +178,7 @@ class TrendMomentumStrategy(Strategy):
                 confidence += 8
             else:
                 confidence -= 10
-                reasons.append(f"Осторожно: стохастик в зоне перегрева ({stoch_now:.0f})")
+                reasons.append("Осторожно: рынок уже разогнался, вход поздноват")
 
         volume_spike = self._volume_spike(candles)
         if cfg.get("require_volume") and not volume_spike:
@@ -179,12 +186,12 @@ class TrendMomentumStrategy(Strategy):
             return None
         if volume_spike:
             confidence += 5
-            reasons.append("Объём выше среднего")
+            reasons.append("Торгуют активнее обычного")
 
         rsi_mid = abs(rsi_now - 50)
         if rsi_mid < 20:
             confidence += 5
-            reasons.append(f"RSI {rsi_now:.0f} — запас хода есть")
+            reasons.append("Цена не перегрета — есть куда идти")
 
         confidence = max(0, min(100, confidence))
 

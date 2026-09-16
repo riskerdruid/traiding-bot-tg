@@ -7,12 +7,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import (
-    BotCommand,
-    MenuButtonCommands,
-    MenuButtonWebApp,
-    WebAppInfo,
-)
+from aiogram.types import BotCommand, MenuButtonCommands
 
 from app.bot.handlers import router
 from app.config import settings
@@ -20,17 +15,12 @@ from app.config import settings
 log = logging.getLogger("bot.instance")
 
 COMMANDS = [
-    BotCommand(command="start", description="Главное меню"),
-    BotCommand(command="setup", description="Быстрая настройка в один шаг"),
-    BotCommand(command="signals", description="Активные сигналы"),
-    BotCommand(command="alerts", description="Уведомления по цене"),
-    BotCommand(command="stats", description="Сколько раз угадал"),
-    BotCommand(command="history", description="Завершённые сигналы"),
-    BotCommand(command="news", description="Экономический календарь"),
-    BotCommand(command="status", description="Состояние бота"),
-    BotCommand(command="settings", description="Настройки и режим работы"),
-    BotCommand(command="test", description="Проверить доставку сигналов"),
-    BotCommand(command="help", description="Справка"),
+    BotCommand(command="start", description="Начать сначала"),
+    BotCommand(command="signals", description="Что сейчас в работе"),
+    BotCommand(command="stats", description="Угадываю я или нет"),
+    BotCommand(command="settings", description="Настройки"),
+    BotCommand(command="help", description="Помощь"),
+    BotCommand(command="test", description="Проверить, что сообщения доходят"),
 ]
 
 
@@ -51,32 +41,16 @@ def create_dispatcher() -> Dispatcher:
 
 
 async def setup_bot_profile(bot: Bot) -> None:
-    """Меню команд и кнопка Mini App рядом с полем ввода."""
+    """Список команд рядом с полем ввода."""
     try:
         await bot.set_my_commands(COMMANDS)
     except Exception as exc:
         log.warning("Не удалось установить список команд: %s", exc)
 
-    # Кнопка меню хранится на стороне Telegram и переживает перезапуск бота.
-    # Поэтому при пустом WEBAPP_URL её нужно ЯВНО снять: иначе останется
-    # ссылка от прошлого запуска, и заказчик получит ошибку вместо приложения.
-    if settings.webapp_enabled:
-        try:
-            await bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(
-                    text="Приложение",
-                    web_app=WebAppInfo(url=settings.webapp_url),
-                )
-            )
-            log.info("Кнопка Mini App установлена: %s", settings.webapp_url)
-        except Exception as exc:
-            log.warning("Не удалось установить кнопку Mini App: %s", exc)
-    else:
-        try:
-            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-            log.info(
-                "WEBAPP_URL не задан — кнопка Mini App снята, "
-                "бот работает через сообщения"
-            )
-        except Exception as exc:
-            log.warning("Не удалось снять кнопку Mini App: %s", exc)
+    # Кнопка меню хранится на стороне Telegram и переживает перезапуск.
+    # Ставим её явно: иначе у установок, где раньше было мини-приложение,
+    # осталась бы ссылка в никуда.
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    except Exception as exc:
+        log.warning("Не удалось настроить кнопку меню: %s", exc)
