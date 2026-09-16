@@ -444,6 +444,20 @@ def test_names() -> None:
         catalog.pretty("ABC/USDT:USDT"),
     )
 
+    # Один и тот же актив в разных парах не должен давать две
+    # неотличимые строки в списке выбора
+    shown = [catalog.Choice("BTC/USDT:USDT", "Биткоин", "биржа", False)]
+    check(
+        "совпавшее имя дополняется тикером",
+        catalog.unique_title("BTC/EUR", shown) == "Биткоин · BTC/EUR",
+        catalog.unique_title("BTC/EUR", shown),
+    )
+    check(
+        "уникальное имя остаётся коротким",
+        catalog.unique_title("XAU/USDT:USDT", shown) == "Золото",
+        catalog.unique_title("XAU/USDT:USDT", shown),
+    )
+
 
 def test_help() -> None:
     print("Справка")

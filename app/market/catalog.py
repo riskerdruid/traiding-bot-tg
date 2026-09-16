@@ -96,9 +96,26 @@ async def available(chosen: list[str]) -> list[Choice]:
     # Всё, что человек выбрал раньше, но чего нет в предложенных списках
     for symbol in picked:
         if symbol not in seen:
-            out.append(Choice(symbol, pretty(symbol), "выбрано ранее", True))
+            out.append(
+                Choice(symbol, unique_title(symbol, out), "выбрано ранее", True)
+            )
+            seen.add(symbol)
 
     return out
+
+
+def unique_title(symbol: str, existing: list[Choice]) -> str:
+    """Имя, которое не спутать с уже показанным.
+
+    Красивое имя одно на весь актив: и BTC/USDT, и BTC/EUR — «Биткоин».
+    Две одинаковые строки в списке выбора — это гарантированное нажатие
+    не туда, поэтому к совпавшему имени дописываем сам тикер.
+    """
+    title = pretty(symbol)
+    if title not in {c.title for c in existing}:
+        return title
+    _prefix, name = split_symbol(symbol)
+    return f"{title} · {name.split(':')[0]}"
 
 
 async def _exchange_choices(picked: list[str]) -> list[Choice]:
