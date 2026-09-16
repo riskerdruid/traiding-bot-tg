@@ -28,8 +28,11 @@ os.environ["OWNER_IDS"] = "42"
 os.environ["HEARTBEAT_PATH"] = os.path.join(
     tempfile.gettempdir(), f"heartbeat_test_{os.getpid()}"
 )
+# Приложение проверяем без подписи Telegram — её саму проверяем отдельно
+os.environ["WEBAPP_DEV_MODE"] = "true"
 
 from app import help as help_content  # noqa: E402
+from app.bot import alerts_input  # noqa: E402
 from app.bot import formatters as fmt  # noqa: E402
 from app.bot import keyboards as kb  # noqa: E402
 from app.engine.tracker import Tracker  # noqa: E402
@@ -492,7 +495,7 @@ def test_buttons() -> None:
     texts = set(re.findall(r"F\.text == kb\.(\w+)", source))
 
     markups = [
-        kb.refresh_button(),
+        kb.signals_screen(),
         kb.settings_screen(True),
         kb.symbols_screen(
             [catalog.Choice("XAU/USDT:USDT", "Золото", "биржа", True),
@@ -523,16 +526,290 @@ def test_buttons() -> None:
                 )
     check("кнопки вообще нашлись", seen > 15, f"={seen}")
 
-    labels = {"BTN_SIGNALS", "BTN_STATS", "BTN_SETTINGS", "BTN_HELP"}
+    labels = {"BTN_SIGNALS", "BTN_STATS", "BTN_ALERTS", "BTN_SETTINGS", "BTN_HELP"}
     check("все постоянные кнопки обработаны", labels <= texts, str(labels - texts))
+
+    # Кнопка приложения обработчика не имеет — её нажатие Telegram
+    # перехватывает сам и открывает окно, сообщения боту не приходит
     menu_buttons = {
-        b.text for row in kb.main_menu().keyboard for b in row
+        b.text for row in kb.main_menu().keyboard for b in row if not b.web_app
     }
     check(
         "подписи постоянных кнопок совпадают",
-        menu_buttons == {kb.BTN_SIGNALS, kb.BTN_STATS, kb.BTN_SETTINGS, kb.BTN_HELP},
+        menu_buttons == {getattr(kb, name) for name in labels},
         str(menu_buttons),
     )
+
+
+async def test_alerts() -> None:
+    """Будильник по цене: разбор фразы, хранение, срабатывание."""
+    print("Уведомления по цене")
+
+    # --- что человек написал ---
+    cases = {
+        "биткоин 95000": ("BTC", 95000.0, None, None),
+        "золото -1.5%": ("XAU", None, 1.5, "down"),
+        "биткоин +2%": ("BTC", None, 2.0, "up"),
+        "биткоин 2%": ("BTC", None, 2.0, None),
+        "уведоми когда биткоин будет 95000": ("BTC", 95000.0, None, None),
+        "BTC 95 000 продать половину": ("BTC", 95000.0, None, None),
+    }
+    for text, (ticker, price, percent, direction) in cases.items():
+        parsed = alerts_input.parse_request(text)
+        ok = (
+            parsed is not None
+            and parsed.price == price
+            and parsed.percent == percent
+            and parsed.direction == direction
+            and alerts_input.base_of(
+                alerts_input.resolve_any(parsed.names, []) or ""
+            ) == ticker
+        )
+        check(f"понял «{text}»", ok, str(parsed))
+
+    check("в «просто текст» числа нет", alerts_input.parse_request("просто текст") is None)
+    check(
+        "заметка сохраняется",
+        (alerts_input.parse_request("BTC 95000 продать половину") or
+         alerts_input.Request([])).note == "продать половину",
+    )
+    check(
+        "слова-паразиты не считаются инструментом",
+        alerts_input.resolve_any(["когда", "будет", "биткоин"], []) == "BTC/USDT:USDT",
+        str(alerts_input.resolve_any(["когда", "будет", "биткоин"], [])),
+    )
+    check(
+        "свой инструмент важнее популярного",
+        alerts_input.resolve_any(["биткоин"], ["BTC/EUR"]) == "BTC/EUR",
+    )
+
+    # --- если инструмент уже выбран кнопкой ---
+    value = alerts_input.parse_value("-1.5% на всякий случай")
+    check(
+        "значение без названия разбирается",
+        value is not None and value.percent == 1.5 and value.direction == "down",
+        str(value),
+    )
+
+    # --- хранение ---
+    uid = 555001
+    by_price = await repo.create_alert(
+        owner_id=uid, symbol="BTC/USDT:USDT", price=95000.0, start_price=90000.0,
+        note="продать половину",
+    )
+    check("уровень по цене создан", by_price.id > 0)
+    check("сторону определили сами", by_price.direction == repo.UP, by_price.direction)
+    check("заметка на месте", by_price.note == "продать половину")
+
+    by_percent = await repo.create_alert(
+        owner_id=uid, symbol="BTC/USDT:USDT", percent=1.0,
+        direction=repo.DOWN, start_price=90000.0,
+    )
+    check(
+        "падение на 1% превратилось в цену",
+        abs(by_percent.price - 89100.0) < 1e-6,
+        str(by_percent.price),
+    )
+
+    up, down = await repo.create_alert_pair(
+        owner_id=uid, symbol="XAU/USDT:USDT", percent=2.0, start_price=4000.0,
+    )
+    check("движение в любую сторону — это два уровня",
+          abs(up.price - 4080.0) < 1e-6 and abs(down.price - 3920.0) < 1e-6,
+          f"{up.price} / {down.price}")
+
+    check("рост срабатывает сверху", by_price.reached(95001.0))
+    check("рост не срабатывает снизу", not by_price.reached(94999.0))
+    check("падение срабатывает снизу", by_percent.reached(89000.0))
+    check("падение не срабатывает сверху", not by_percent.reached(89200.0))
+
+    mine = await repo.list_alerts(owner_id=uid)
+    check("свои уровни читаются", len(mine) == 4, f"={len(mine)}")
+    check(
+        "чужие уровни не видны",
+        not await repo.list_alerts(owner_id=999999),
+    )
+
+    fired = await repo.trigger_alert(by_price.id, 95100.0)
+    check("сработавший гаснет", fired is not None and fired.status == repo.ALERT_DONE)
+    check(
+        "сработавший уходит из списка",
+        len(await repo.list_alerts(owner_id=uid)) == 3,
+    )
+    check("повторно не срабатывает", await repo.trigger_alert(by_price.id, 95100.0) is None)
+
+    check("снятие работает", await repo.cancel_alert(by_percent.id, owner_id=uid))
+    check(
+        "чужое не снять",
+        not await repo.cancel_alert(up.id, owner_id=999999),
+    )
+    left = await repo.cancel_all_alerts(uid)
+    check("снять все разом", left == 2, f"={left}")
+    check("после уборки пусто", not await repo.list_alerts(owner_id=uid))
+
+    # --- тексты ---
+    sample = await repo.create_alert(
+        owner_id=42, symbol="BTC/USDT:USDT", price=95000.0, start_price=90000.0,
+        note="продать половину",
+    )
+    check_text("список уведомлений", fmt.alerts_card([sample], {"BTC/USDT:USDT": 91000.0}))
+    check_text("пустой список уведомлений", fmt.alerts_card([]))
+    check_text("подтверждение уровня", fmt.alert_created(sample, 90000.0))
+    check_text("сработавшее уведомление", fmt.alert_fired(sample, 95100.0))
+    check_text("вопрос о цене", fmt.alert_ask_value("BTC/USDT:USDT", 90000.0))
+    pair_up, pair_down = await repo.create_alert_pair(
+        owner_id=42, symbol="BTC/USDT:USDT", percent=2.0, start_price=90000.0,
+    )
+    check_text("оба уровня разом", fmt.alert_pair_created(pair_up, pair_down, 90000.0, 2.0))
+    check(
+        "в уведомлении сказано, что это не сигнал",
+        "не сигнал" in fmt.alert_fired(sample, 95100.0),
+    )
+    await repo.cancel_all_alerts(42)
+
+
+async def test_webapp() -> None:
+    """Мини-приложение: подпись Telegram и все его запросы."""
+    print("Мини-приложение")
+    import hashlib
+    import hmac
+    from urllib.parse import urlencode
+
+    from fastapi.testclient import TestClient
+
+    from app.api import server as api_server
+    from app.api.auth import verify_init_data
+    from app.market.feed import feed
+
+    # --- подпись ---
+    token = "123456:TEST"
+    payload = {"auth_date": str(int(time.time())), "query_id": "x", "user": '{"id":42}'}
+    check_string = "\n".join(f"{k}={payload[k]}" for k in sorted(payload))
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    signature = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+    good = urlencode({**payload, "hash": signature})
+
+    check("правильная подпись принимается", verify_init_data(good, token) is not None)
+    check(
+        "подделанная подпись отвергается",
+        verify_init_data(urlencode({**payload, "hash": "0" * 64}), token) is None,
+    )
+    check("пустая строка отвергается", verify_init_data("", token) is None)
+    check(
+        "чужой токен не подходит",
+        verify_init_data(good, "999:OTHER") is None,
+    )
+    old = {**payload, "auth_date": str(int(time.time()) - 200000)}
+    old_string = "\n".join(f"{k}={old[k]}" for k in sorted(old))
+    old_hash = hmac.new(secret, old_string.encode(), hashlib.sha256).hexdigest()
+    check(
+        "просроченная подпись отвергается",
+        verify_init_data(urlencode({**old, "hash": old_hash}), token) is None,
+    )
+
+    # --- сами запросы; биржу подменяем, тест не должен зависеть от сети ---
+    async def fake_price(symbol: str) -> float:
+        return 90000.0
+
+    async def fake_prices(symbols: list[str]) -> dict:
+        return {s: 90000.0 for s in symbols}
+
+    real_price, real_prices = feed.fetch_price, feed.fetch_prices
+    feed.fetch_price, feed.fetch_prices = fake_price, fake_prices
+    try:
+        with TestClient(api_server.create_app()) as client:
+            r = client.get("/api/overview")
+            check("экран приложения отдаётся", r.status_code == 200, f"={r.status_code}")
+            body = r.json()
+            for key in ("pulse", "active", "recent", "stats", "alerts", "settings"):
+                check(f"в ответе есть «{key}»", key in body)
+            check(
+                "настройки приложения совпадают с ботом",
+                body["settings"]["deposit"] == config.view(42).get("deposit"),
+                str(body["settings"]["deposit"]),
+            )
+
+            r = client.post(
+                "/api/alerts",
+                json={"symbol": "BTC/USDT:USDT", "value": "-1%"},
+            )
+            check("уведомление ставится из приложения", r.status_code == 200, r.text[:80])
+            created = r.json()["created"][0]
+            check(
+                "цена уровня посчитана от текущей",
+                abs(created["price"] - 89100.0) < 1e-6,
+                str(created["price"]),
+            )
+
+            r = client.post("/api/alerts", json={"symbol": "BTC/USDT:USDT", "value": "ерунда"})
+            check("бессмыслицу приложение не принимает", r.status_code == 400, f"={r.status_code}")
+
+            r = client.delete(f"/api/alerts/{created['id']}")
+            check("уведомление снимается", r.status_code == 200 and r.json()["ok"])
+
+            r = client.post("/api/settings", json={"preset": "careful"})
+            check("режим меняется из приложения", r.status_code == 200, r.text[:80])
+            check(
+                "и правда применился",
+                config.view(42).current_preset() == "careful",
+                str(config.view(42).current_preset()),
+            )
+            r = client.post("/api/settings", json={"preset": "выдуманный"})
+            check("неизвестный режим отклонён", r.status_code == 400, f"={r.status_code}")
+            r = client.post("/api/settings", json={"symbols": []})
+            check("пустой список инструментов отклонён", r.status_code == 400)
+            client.post("/api/settings", json={"preset": "balanced"})
+
+            r = client.get("/api/health")
+            check("проверка здоровья отвечает", r.status_code in (200, 503))
+
+            r = client.get("/")
+            check("страница приложения отдаётся", r.status_code == 200)
+            page = r.text
+            check("в странице есть вкладки", 'data-tab="signals"' in page)
+            for asset in ("/static/app.js", "/static/style.css"):
+                check(f"страница ссылается на {asset}", asset in page)
+                check(f"{asset} отдаётся", client.get(asset).status_code == 200)
+    finally:
+        feed.fetch_price, feed.fetch_prices = real_price, real_prices
+
+
+def test_webapp_files() -> None:
+    """Приложение не должно тянуть ничего лишнего и ломать вёрстку."""
+    print("Файлы приложения")
+    import pathlib
+    import re as _re
+
+    webapp = pathlib.Path("app/api/webapp")
+    page = (webapp / "index.html").read_text(encoding="utf-8")
+    script = (webapp / "app.js").read_text(encoding="utf-8")
+    styles = (webapp / "style.css").read_text(encoding="utf-8")
+
+    check("страница лёгкая", len(page) < 8000, f"{len(page)} байт")
+    check("скрипт обозримый", len(script) < 40000, f"{len(script)} байт")
+    check("стили обозримые", len(styles) < 30000, f"{len(styles)} байт")
+
+    sources = _re.findall(r'src="(https?://[^"]+)"', page)
+    check(
+        "внешний скрипт только от Telegram",
+        all(s.startswith("https://telegram.org/") for s in sources),
+        str(sources),
+    )
+    check("подпись уходит на сервер", "X-Telegram-Init-Data" in script)
+    check("текст от сервера экранируется", "function escape(" in script)
+
+    # Вкладки в вёрстке и в коде должны совпадать: иначе нажатие открывает пустоту
+    tabs = set(_re.findall(r'data-tab="(\w+)"', page))
+    painted = set(_re.findall(r"^\s{4}(\w+): paint", script, _re.M))
+    check("у каждой вкладки есть отрисовка", tabs == painted, f"{tabs} / {painted}")
+
+    # Каждый onclick в шаблонах должен вести в существующую функцию
+    handlers = set(_re.findall(r'onclick="(\w+)\(', script))
+    defined = set(_re.findall(r"function (\w+)\(", script))
+    check("все кнопки приложения ведут в код", handlers <= defined, str(handlers - defined))
+
+    check("цвета берутся у Telegram", "--tg-theme-bg-color" in styles)
+    check("вёрстка учитывает вырез экрана", "safe-area-inset-bottom" in styles)
 
 
 async def test_heartbeat() -> None:
@@ -604,6 +881,9 @@ async def main() -> int:
         await test_strategy()
         await test_settings()
         await test_messages()
+        await test_alerts()
+        await test_webapp()
+        test_webapp_files()
         test_names()
         test_help()
         test_buttons()

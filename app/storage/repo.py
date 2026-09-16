@@ -542,3 +542,278 @@ async def prune_events(keep: int = 2000) -> None:
         (keep,),
     )
     await conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Уведомления по цене
+#
+# Человек называет уровень — бот сообщает, когда рынок до него дошёл.
+# Это не сигнал и не сделка: ни входа, ни стопа здесь нет, только
+# «сообщи, когда биткоин будет стоить 95 000».
+# --------------------------------------------------------------------------
+
+ALERT_ACTIVE = "ACTIVE"
+ALERT_DONE = "DONE"
+ALERT_CANCELLED = "CANCELLED"
+
+UP = "up"
+DOWN = "down"
+
+
+@dataclass(slots=True)
+class Alert:
+    id: int
+    owner_id: int
+    symbol: str
+    price: float
+    direction: str
+    start_price: float | None
+    note: str
+    repeat: bool
+    status: str
+    created_at: int
+    triggered_at: int | None = None
+    hit_price: float | None = None
+    # Уровень мог быть задан не ценой, а движением в процентах от текущей.
+    # Само движение храним, чтобы сказать человеку «упал на 1.5%», а не
+    # только назвать цену, которую он не вводил.
+    percent: float | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == ALERT_ACTIVE
+
+    def reached(self, price: float) -> bool:
+        """Дошла ли цена до заказанного уровня."""
+        if self.direction == UP:
+            return price >= self.price
+        return price <= self.price
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "owner_id": self.owner_id,
+            "symbol": self.symbol,
+            "price": self.price,
+            "direction": self.direction,
+            "start_price": self.start_price,
+            "note": self.note,
+            "repeat": self.repeat,
+            "percent": self.percent,
+            "status": self.status,
+            "created_at": self.created_at,
+            "triggered_at": self.triggered_at,
+            "hit_price": self.hit_price,
+        }
+
+
+def _row_to_alert(row: Any) -> Alert:
+    return Alert(
+        id=row["id"],
+        owner_id=row["owner_id"],
+        symbol=row["symbol"],
+        price=row["price"],
+        direction=row["direction"],
+        start_price=row["start_price"],
+        note=row["note"] or "",
+        repeat=bool(row["repeat"]),
+        percent=row["percent"],
+        status=row["status"],
+        created_at=row["created_at"],
+        triggered_at=row["triggered_at"],
+        hit_price=row["hit_price"],
+    )
+
+
+async def create_alert(
+    *,
+    owner_id: int,
+    symbol: str,
+    price: float | None = None,
+    start_price: float | None = None,
+    direction: str | None = None,
+    note: str = "",
+    repeat: bool = False,
+    percent: float | None = None,
+) -> Alert:
+    """Заводит уведомление.
+
+    Уровень задаётся либо ценой, либо движением в процентах от текущей —
+    во втором случае цену считаем здесь и дальше живём с обычным уровнем.
+    Так вся проверка остаётся одной строчкой сравнения.
+
+    Сторону определяем сами по текущей цене: человек называет число,
+    а не направление. Если цена уже выше заказанной, ждать её сверху
+    бессмысленно — значит, ждём снижения.
+    """
+    if percent is not None:
+        if start_price is None:
+            raise ValueError("Для движения в процентах нужна текущая цена")
+        if direction is None:
+            direction = UP
+        shift = start_price * float(percent) / 100
+        price = start_price + shift if direction == UP else start_price - shift
+
+    if price is None:
+        raise ValueError("Не задан уровень уведомления")
+
+    if direction is None:
+        direction = UP if (start_price is None or price >= start_price) else DOWN
+
+    conn = await db.connect()
+    now = int(time.time())
+    cursor = await conn.execute(
+        """
+        INSERT INTO alerts
+            (owner_id, symbol, price, direction, start_price, note,
+             repeat, status, created_at, percent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (owner_id, symbol, float(price), direction, start_price, note,
+         int(bool(repeat)), ALERT_ACTIVE, now, percent),
+    )
+    await conn.commit()
+    return Alert(
+        id=cursor.lastrowid,
+        owner_id=owner_id,
+        symbol=symbol,
+        price=float(price),
+        direction=direction,
+        start_price=start_price,
+        note=note,
+        repeat=bool(repeat),
+        status=ALERT_ACTIVE,
+        created_at=now,
+        percent=percent,
+    )
+
+
+async def create_alert_pair(
+    *,
+    owner_id: int,
+    symbol: str,
+    percent: float,
+    start_price: float,
+    note: str = "",
+) -> list[Alert]:
+    """Движение на N процентов в любую сторону — это два уведомления.
+
+    Человек, написавший просто «биткоин 2%», хочет знать о заметном
+    движении, а не о росте именно вверх. Двумя записями это выражается
+    честнее, чем одна запись с признаком: сработает та, до которой
+    дошла цена, вторую можно снять.
+    """
+    return [
+        await create_alert(
+            owner_id=owner_id, symbol=symbol, percent=percent,
+            start_price=start_price, direction=side, note=note,
+        )
+        for side in (UP, DOWN)
+    ]
+
+
+async def get_alert(alert_id: int) -> Alert | None:
+    conn = await db.connect()
+    async with conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)) as cur:
+        row = await cur.fetchone()
+    return _row_to_alert(row) if row else None
+
+
+async def list_alerts(
+    owner_id: int | None = None,
+    status: str | None = ALERT_ACTIVE,
+    limit: int = 100,
+) -> list[Alert]:
+    conn = await db.connect()
+    sql = "SELECT * FROM alerts WHERE 1 = 1"
+    params: list[Any] = []
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params.append(owner_id)
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with conn.execute(sql, params) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_alert(r) for r in rows]
+
+
+async def active_alert_symbols() -> list[str]:
+    """За какими инструментами вообще нужно следить ради уведомлений."""
+    conn = await db.connect()
+    async with conn.execute(
+        "SELECT DISTINCT symbol FROM alerts WHERE status = ?", (ALERT_ACTIVE,)
+    ) as cur:
+        rows = await cur.fetchall()
+    return [r["symbol"] for r in rows]
+
+
+async def trigger_alert(alert_id: int, price: float) -> Alert | None:
+    """Отмечает срабатывание.
+
+    Повторяющееся уведомление остаётся активным, но его уровень
+    переворачивается: иначе на границе оно зазвонит на каждой проверке.
+    """
+    alert = await get_alert(alert_id)
+    if alert is None or not alert.is_active:
+        # Уже сработало или снято. Вернуть его как новое нельзя: сторож
+        # принял бы это за срабатывание и отправил человеку то же самое
+        # второй раз.
+        return None
+
+    conn = await db.connect()
+    now = int(time.time())
+    if alert.repeat:
+        flipped = DOWN if alert.direction == UP else UP
+        await conn.execute(
+            "UPDATE alerts SET direction = ?, triggered_at = ?, hit_price = ? "
+            "WHERE id = ?",
+            (flipped, now, price, alert_id),
+        )
+        alert.direction = flipped
+    else:
+        await conn.execute(
+            "UPDATE alerts SET status = ?, triggered_at = ?, hit_price = ? "
+            "WHERE id = ?",
+            (ALERT_DONE, now, price, alert_id),
+        )
+        alert.status = ALERT_DONE
+    await conn.commit()
+    alert.triggered_at = now
+    alert.hit_price = price
+    return alert
+
+
+async def cancel_alert(alert_id: int, owner_id: int | None = None) -> bool:
+    """Снимает уведомление. Чужое снять нельзя."""
+    conn = await db.connect()
+    sql = "UPDATE alerts SET status = ? WHERE id = ? AND status = ?"
+    params: list[Any] = [ALERT_CANCELLED, alert_id, ALERT_ACTIVE]
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params.append(owner_id)
+    cursor = await conn.execute(sql, params)
+    await conn.commit()
+    return cursor.rowcount > 0
+
+
+async def cancel_all_alerts(owner_id: int) -> int:
+    conn = await db.connect()
+    cursor = await conn.execute(
+        "UPDATE alerts SET status = ? WHERE owner_id = ? AND status = ?",
+        (ALERT_CANCELLED, owner_id, ALERT_ACTIVE),
+    )
+    await conn.commit()
+    return cursor.rowcount
+
+
+async def count_alerts(owner_id: int, status: str = ALERT_ACTIVE) -> int:
+    conn = await db.connect()
+    async with conn.execute(
+        "SELECT COUNT(*) AS n FROM alerts WHERE owner_id = ? AND status = ?",
+        (owner_id, status),
+    ) as cur:
+        row = await cur.fetchone()
+    return row["n"] if row else 0

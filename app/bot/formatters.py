@@ -73,6 +73,11 @@ def pct(value: float | None, signed: bool = True) -> str:
     return f"{value:+.2f}%" if signed else f"{value:.2f}%"
 
 
+def signals_word(count: int) -> str:
+    """«1 из 1 сигнала», но «6 из 9 сигналов»."""
+    return "сигнала" if count % 10 == 1 and count % 100 != 11 else "сигналов"
+
+
 def bar(value: float, width: int = 10) -> str:
     """Шкала из блоков — уверенность видно, не читая числа."""
     filled = max(0, min(width, round(value / 100 * width)))
@@ -394,7 +399,7 @@ def stats_card(data: dict, by_symbol: list[dict], risk_money: float) -> str:
     if data["decided"]:
         lines += [
             f"{mood} <b>Угадано {winrate:.0f}%</b> — {data['wins']} "
-            f"из {data['decided']} сигналов",
+            f"из {data['decided']} {signals_word(data['decided'])}",
             f"<code>{bar(winrate)}</code>",
             "",
         ]
@@ -614,7 +619,9 @@ def greeting(name: str, cfg, active: int, decided: int, winrate: float) -> str:
     if active:
         lines.append(f"🎯 Сейчас в работе: <b>{active}</b>")
     if decided:
-        lines.append(f"📊 Угадано: <b>{winrate:.0f}%</b> из {decided} завершённых")
+        lines.append(
+            f"📊 Угадано: <b>{winrate:.0f}%</b> из {decided} завершённых"
+        )
 
     lines += [
         "",
@@ -668,4 +675,152 @@ def test_signal_card(symbol: str, price: float, is_binary: bool, cfg) -> str:
         + signal_card(sample)
         + f"\n\n━━━━━━━━━━━━━━━\n\n✅ Сообщения доходят. "
         f"<i>Версия {settings.app_version}</i>"
+    )
+
+
+# --------------------------------------------------------------------------
+# Уведомления по цене
+#
+# Это не сигнал: бот ничего не советует, а просто сообщает, что рынок
+# дошёл до числа, которое человек назвал сам. Разница принципиальная,
+# поэтому она проговаривается в каждом сообщении.
+# --------------------------------------------------------------------------
+
+
+def alerts_card(alerts: list, prices: dict[str, float] | None = None) -> str:
+    prices = prices or {}
+    if not alerts:
+        return (
+            "🔔 <b>Уведомления по цене</b>\n\n"
+            "Пока ни одного.\n\n"
+            "Это будильник: вы называете цену — я пишу, когда рынок до неё "
+            "дошёл. Например: «сообщи, когда биткоин будет стоить 95 000» "
+            "или «если золото упадёт на 1%».\n\n"
+            "Нажмите <b>➕ Добавить</b> — я всё спрошу сам."
+        )
+
+    lines = ["🔔 <b>Уведомления по цене</b>", "", "Жду вот этого:", ""]
+    for alert in alerts:
+        name = short_symbol(alert.symbol)
+        if alert.percent is not None:
+            move = "вырастет" if alert.direction == repo.UP else "упадёт"
+            head = f"• <b>{name}</b> {move} на {alert.percent:g}%"
+            tail = f" — это {money(alert.price)}"
+        else:
+            move = "поднимется до" if alert.direction == repo.UP else "опустится до"
+            head = f"• <b>{name}</b> {move} <b>{money(alert.price)}</b>"
+            tail = ""
+        lines.append(head + tail)
+
+        now = prices.get(alert.symbol)
+        if now:
+            distance = abs(now - alert.price) / now * 100
+            where = "вверх" if alert.price > now else "вниз"
+            lines.append(
+                f"   <i>сейчас {money(now)} — идти {distance:.2f}% {where}</i>"
+            )
+        if alert.note:
+            lines.append(f"   📝 <i>{alert.note}</i>")
+
+    lines += [
+        "",
+        "<i>Сработавшее уведомление гаснет само. Это не совет на сделку — "
+        "просто напоминание о цене.</i>",
+    ]
+    return "\n".join(lines)
+
+
+def alert_created(alert, current: float | None) -> str:
+    """Подтверждение: что именно бот теперь ждёт."""
+    name = short_symbol(alert.symbol)
+    if alert.percent is not None:
+        move = "вырастет" if alert.direction == repo.UP else "упадёт"
+        head = (
+            f"🔔 <b>Принято.</b> Сообщу, если {name} {move} "
+            f"на <b>{alert.percent:g}%</b>."
+        )
+    else:
+        move = "поднимется до" if alert.direction == repo.UP else "опустится до"
+        head = f"🔔 <b>Принято.</b> Сообщу, когда {name} {move} <b>{money(alert.price)}</b>."
+
+    lines = [head, ""]
+    if current:
+        distance = abs(current - alert.price) / current * 100
+        where = "вверх" if alert.price > current else "вниз"
+        lines.append(
+            f"Сейчас <b>{money(current)}</b>, сработает при "
+            f"<b>{money(alert.price)}</b> — идти {distance:.2f}% {where}."
+        )
+    if alert.note:
+        lines.append(f"📝 Заметка: <i>{alert.note}</i>")
+    lines += [
+        "",
+        "<i>Это будильник по цене, а не сигнал на сделку.</i>",
+    ]
+    return "\n".join(lines)
+
+
+def alert_pair_created(up, down, current: float | None, percent: float) -> str:
+    """Человек попросил движение «на N%», не сказав куда — ждём обе стороны."""
+    name = short_symbol(up.symbol)
+    return "\n".join(
+        [
+            f"🔔 <b>Принято.</b> Сообщу, если {name} сдвинется "
+            f"на <b>{percent:g}%</b> в любую сторону.",
+            "",
+            f"Сейчас <b>{money(current)}</b>",
+            f"▲ вверх — при {money(up.price)}",
+            f"▼ вниз — при {money(down.price)}",
+            "",
+            "<i>Это будильник по цене, а не сигнал на сделку.</i>",
+        ]
+    )
+
+
+def alert_fired(alert, price: float) -> str:
+    """Сообщение в момент, когда цена дошла до заказанного уровня."""
+    name = short_symbol(alert.symbol)
+    if alert.percent is not None:
+        move = "вырос" if alert.direction == repo.UP else "упал"
+        head = f"🔔 <b>{name} {move} на {alert.percent:g}%</b>"
+    else:
+        move = "поднялся до" if alert.direction == repo.UP else "опустился до"
+        head = f"🔔 <b>{name} {move} {money(alert.price)}</b>"
+
+    lines = [head, "", f"Сейчас: <b>{money(price)}</b>"]
+
+    if alert.start_price:
+        delta = price - alert.start_price
+        arrow = "▲" if delta >= 0 else "▼"
+        delta_pct = delta / alert.start_price * 100
+        lines.append(
+            f"С того момента, как вы попросили: {arrow} {pct(delta_pct)} "
+            f"(было {money(alert.start_price)})"
+        )
+    lines.append(f"Заказано {local_time(alert.created_at, with_date=True)}")
+
+    if alert.note:
+        lines.append(f"📝 Ваша заметка: <i>{alert.note}</i>")
+
+    lines += [
+        "",
+        "<i>Это не сигнал: я сообщил ровно о том, о чём вы просили. "
+        "Решение — за вами.</i>",
+    ]
+    return "\n".join(lines)
+
+
+def alert_ask_value(symbol: str, price: float | None) -> str:
+    """Второй шаг мастера: что именно сообщить по выбранному инструменту."""
+    name = short_symbol(symbol)
+    now = f"Сейчас <b>{money(price)}</b>.\n\n" if price else ""
+    return (
+        f"🔔 <b>{name}</b>\n\n"
+        f"{now}"
+        "Выберите кнопкой или напишите числом:\n"
+        f"<code>{money(price) if price else '95000'}</code> — сообщу при этой цене\n"
+        "<code>-1%</code> — если упадёт на столько\n"
+        "<code>+2%</code> — если вырастет\n\n"
+        "<i>После числа можно дописать заметку для себя — "
+        "она вернётся вместе с уведомлением.</i>"
     )

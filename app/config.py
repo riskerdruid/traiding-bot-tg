@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # --- Telegram ---
     bot_token: str = ""
     owner_ids: str = ""
+    # Адрес мини-приложения. Пусто — бот работает только сообщениями,
+    # кнопки приложения просто не появляются.
+    webapp_url: str = ""
 
     # --- Рынок ---
     exchange: str = "okx"
@@ -69,6 +72,13 @@ class Settings(BaseSettings):
     signal_ttl_min: int = 240
     cooldown_min: int = 45
 
+    # --- Сервер мини-приложения ---
+    api_host: str = "0.0.0.0"
+    api_port: int = 8080
+    # Отключает проверку подписи Telegram, чтобы открыть приложение
+    # в обычном браузере при разработке. В рабочем режиме только false.
+    webapp_dev_mode: bool = False
+
     # --- Система ---
     timezone: str = "Europe/Moscow"
     daily_report_at: str = "21:00"
@@ -101,6 +111,11 @@ class Settings(BaseSettings):
     @property
     def symbol_list(self) -> list[str]:
         return _split(self.symbols)
+
+    @property
+    def webapp_enabled(self) -> bool:
+        """Telegram принимает кнопки приложения только с https-адресом."""
+        return self.webapp_url.startswith("https://")
 
     @property
     def tz(self):

@@ -1,4 +1,4 @@
-"""Запуск приложения: бот, сканер и трекер в одном процессе.
+"""Запуск приложения: бот, сканер, трекер и веб-сервер в одном процессе.
 
 Один процесс выбран сознательно: компонентов немного, они делят одну базу
 и один клиент биржи, а разносить их по сервисам означало бы усложнить
@@ -16,12 +16,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import uvicorn
 from aiogram.exceptions import TelegramUnauthorizedError
 
+from app.api import server as api_server
 from app.bot import handlers as bot_handlers
 from app.bot.instance import create_bot, create_dispatcher, setup_bot_profile
 from app.bot.notifier import Notifier
 from app.config import settings
+from app.engine.alerts import AlertWatcher
 from app.engine.scanner import Scanner
 from app.engine.tracker import Tracker
 from app.logging_conf import setup_logging
@@ -57,6 +60,8 @@ class Application:
         self.notifier: Notifier | None = None
         self.scanner: Scanner | None = None
         self.tracker: Tracker | None = None
+        self.alerts: AlertWatcher | None = None
+        self.api: uvicorn.Server | None = None
         self.tasks: list[asyncio.Task] = []
         self.started_at = time.time()
         self._stopping = False
@@ -103,15 +108,19 @@ class Application:
 
         self.scanner = Scanner(on_signal=self.notifier.send_signal)
         self.tracker = Tracker(on_outcome=self.notifier.send_outcome)
+        # Уровни, заказанные человеком вручную, живут отдельно от сигналов:
+        # следить приходится и за теми инструментами, которых нет в списке
+        self.alerts = AlertWatcher(on_hit=self.notifier.send_price_alert)
 
-        bot_handlers.runtime.update(
-            {
-                "scanner": self.scanner,
-                "tracker": self.tracker,
-                "notifier": self.notifier,
-                "started_at": self.started_at,
-            }
-        )
+        shared = {
+            "scanner": self.scanner,
+            "tracker": self.tracker,
+            "alerts": self.alerts,
+            "notifier": self.notifier,
+            "started_at": self.started_at,
+        }
+        bot_handlers.runtime.update(shared)
+        api_server.runtime.update(shared)
 
         try:
             me = await self.bot.get_me()
@@ -134,6 +143,32 @@ class Application:
     # ----------------------------------------------------------------
     # Фоновые задачи
     # ----------------------------------------------------------------
+
+    async def _run_api(self) -> None:
+        """Веб-сервер мини-приложения.
+
+        Имя переменной намеренно не `config`: так называются живые
+        настройки, импортированные выше, и затенять их здесь опасно.
+        """
+        uvicorn_config = uvicorn.Config(
+            api_server.create_app(),
+            host=settings.api_host,
+            port=settings.api_port,
+            log_level="warning",
+            access_log=False,
+        )
+        self.api = uvicorn.Server(uvicorn_config)
+        # Uvicorn по умолчанию перехватывает сигналы — здесь это мешает,
+        # завершением управляет Application
+        self.api.install_signal_handlers = lambda: None
+        log.info(
+            "Веб-сервер на http://%s:%d %s",
+            settings.api_host,
+            settings.api_port,
+            f"(приложение: {settings.webapp_url})" if settings.webapp_enabled
+            else "(WEBAPP_URL не задан — приложение не подключено)",
+        )
+        await self.api.serve()
 
     async def _run_heartbeat(self) -> None:
         """Обновляет файл-отметку, пока цикл событий жив."""
@@ -181,8 +216,10 @@ class Application:
         await self.setup()
 
         self.tasks = [
+            asyncio.create_task(self._run_api(), name="api"),
             self.scanner.start(),
             self.tracker.start(),
+            self.alerts.start(),
             asyncio.create_task(self._run_heartbeat(), name="heartbeat"),
             asyncio.create_task(self._run_daily_report(), name="daily"),
             asyncio.create_task(self._run_housekeeping(), name="housekeeping"),
@@ -211,10 +248,15 @@ class Application:
             await self.scanner.stop()
         if self.tracker:
             await self.tracker.stop()
+        if self.alerts:
+            await self.alerts.stop()
 
         if self.dispatcher:
             with contextlib.suppress(Exception):
                 await self.dispatcher.stop_polling()
+
+        if self.api:
+            self.api.should_exit = True
 
         for task in self.tasks:
             task.cancel()

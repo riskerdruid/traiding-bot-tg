@@ -19,6 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from app import help as help_content
+from app.bot import alerts_input
 from app.bot import formatters as fmt
 from app.bot import keyboards as kb
 from app.config import settings
@@ -36,10 +37,11 @@ runtime: dict = {"scanner": None, "tracker": None, "started_at": time.time()}
 
 
 class Setup(StatesGroup):
-    """Два случая, когда от человека нужен текст, а не нажатие."""
+    """Случаи, когда от человека нужен текст, а не нажатие."""
 
     deposit = State()
     pocket_key = State()
+    alert_value = State()
 
 
 # --------------------------------------------------------------------------
@@ -96,13 +98,16 @@ async def screen_signals(uid: int) -> tuple[str, object]:
         # Первые секунды после запуска сканер ещё проверяет доступность
         # инструментов. Показать пустой список значило бы напугать зря.
         state["symbols"] = list(config.get("symbols", user_id=uid) or [])
-    return fmt.signals_screen(active, closed, prices, state), kb.refresh_button()
+    return fmt.signals_screen(active, closed, prices, state), kb.signals_screen()
 
 
 async def screen_stats(uid: int) -> tuple[str, object]:
     data = await repo.stats(owner_id=uid)
     by_symbol = await repo.stats_by_symbol(owner_id=uid)
-    return fmt.stats_card(data, by_symbol, config.view(uid).risk_money()), None
+    return (
+        fmt.stats_card(data, by_symbol, config.view(uid).risk_money()),
+        kb.stats_screen(),
+    )
 
 
 async def screen_settings(uid: int) -> tuple[str, object]:
@@ -117,6 +122,15 @@ async def screen_symbols(uid: int) -> tuple[str, object]:
         fmt.symbols_card(choices),
         kb.symbols_screen(choices, feed.pocket_broker.configured),
     )
+
+
+async def screen_alerts(uid: int) -> tuple[str, object]:
+    alerts = await repo.list_alerts(owner_id=uid)
+    prices: dict[str, float] = {}
+    if alerts:
+        with contextlib.suppress(Exception):
+            prices = await feed.fetch_prices(sorted({a.symbol for a in alerts}))
+    return fmt.alerts_card(alerts, prices), kb.alerts_screen(alerts)
 
 
 async def screen_presets(uid: int) -> tuple[str, object]:
@@ -177,6 +191,14 @@ async def cmd_signals(message: Message, state: FSMContext) -> None:
 async def cmd_stats(message: Message, state: FSMContext) -> None:
     await state.clear()
     text, markup = await screen_stats(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("alerts"))
+@router.message(F.text == kb.BTN_ALERTS)
+async def cmd_alerts(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    text, markup = await screen_alerts(message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
 
@@ -464,18 +486,210 @@ async def clear_pocket_key(call: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------
+# Уведомления по цене
+#
+# Два пути к одному и тому же: мастер в два нажатия — для тех, кто не хочет
+# ничего писать, и обычная фраза «биткоин 95000» — для тех, кому так быстрее.
+# Внутри оба сходятся в _make_alert.
+# --------------------------------------------------------------------------
+
+
+async def _make_alert(uid: int, symbol: str, parsed) -> tuple[str, object]:
+    """Заводит уведомление по разобранному запросу.
+
+    Возвращает готовый ответ человеку. Если цену инструмента сейчас
+    не узнать, будильник не ставим: сравнивать было бы не с чем.
+    """
+    current = await feed.fetch_price(symbol)
+    if current is None:
+        return (
+            f"😕 Не удалось узнать цену <b>{fmt.short_symbol(symbol)}</b> — "
+            "уведомление не поставил.\n\n"
+            "Похоже, площадка сейчас недоступна. Попробуйте позже.",
+            kb.alert_done(),
+        )
+
+    if parsed.by_percent and parsed.direction is None:
+        # «биткоин 2%» без знака — человек ждёт заметного движения,
+        # а не роста именно вверх. Ставим оба уровня.
+        up, down = await repo.create_alert_pair(
+            owner_id=uid, symbol=symbol, percent=parsed.percent,
+            start_price=current, note=parsed.note,
+        )
+        return (
+            fmt.alert_pair_created(up, down, current, parsed.percent),
+            kb.alert_done(),
+        )
+
+    if parsed.by_percent:
+        alert = await repo.create_alert(
+            owner_id=uid, symbol=symbol, percent=parsed.percent,
+            direction=parsed.direction, start_price=current, note=parsed.note,
+        )
+    else:
+        alert = await repo.create_alert(
+            owner_id=uid, symbol=symbol, price=parsed.price,
+            start_price=current, note=parsed.note,
+        )
+    return fmt.alert_created(alert, current), kb.alert_done()
+
+
+@router.callback_query(F.data == "nav:alerts")
+async def nav_alerts(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data == "alert:add")
+async def alert_add(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    chosen = list(config.get("symbols", user_id=call.from_user.id) or [])
+    await _render(
+        call,
+        "🔔 <b>По какому инструменту сообщить?</b>\n\n"
+        "<i>Уведомление можно поставить на что угодно — следить за этим "
+        "постоянно для этого не обязательно.</i>",
+        kb.alert_symbols(catalog.quick_list(chosen)),
+    )
+
+
+@router.callback_query(F.data.startswith("alert:sym:"))
+async def alert_pick_symbol(call: CallbackQuery, state: FSMContext) -> None:
+    symbol = call.data.split(":", 2)[2]
+    await state.set_state(Setup.alert_value)
+    await state.update_data(symbol=symbol)
+    await call.answer()
+    price = await feed.fetch_price(symbol)
+    await _render(call, fmt.alert_ask_value(symbol, price), kb.alert_values(symbol))
+
+
+@router.callback_query(F.data.startswith("alert:pct:"))
+async def alert_by_percent(call: CallbackQuery, state: FSMContext) -> None:
+    symbol = (await state.get_data()).get("symbol")
+    if not symbol:
+        await call.answer("Начните заново: «➕ Добавить»", show_alert=True)
+        return
+
+    value = int(call.data.rsplit(":", 1)[1])
+    parsed = alerts_input.Request(
+        names=[],
+        percent=abs(value),
+        direction=alerts_input.UP if value > 0 else alerts_input.DOWN,
+    )
+    await call.answer()
+    text, markup = await _make_alert(call.from_user.id, symbol, parsed)
+    await state.clear()
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data == "alert:custom")
+async def alert_ask_price(call: CallbackQuery, state: FSMContext) -> None:
+    symbol = (await state.get_data()).get("symbol")
+    if not symbol:
+        await call.answer("Начните заново: «➕ Добавить»", show_alert=True)
+        return
+
+    await call.answer()
+    price = await feed.fetch_price(symbol)
+    now = f"Сейчас <b>{fmt.money(price)}</b>.\n" if price else ""
+    await _render(
+        call,
+        f"✏️ <b>{fmt.short_symbol(symbol)}</b>\n\n"
+        "Напишите цену числом — например <code>95000</code>.\n"
+        f"{now}"
+        "\n<i>Можно и движением: <code>-1.5%</code>. После числа — "
+        "заметка для себя, если нужна.</i>",
+        kb.cancel("nav:alerts"),
+    )
+
+
+@router.message(Setup.alert_value)
+async def alert_got_value(message: Message, state: FSMContext) -> None:
+    """Инструмент уже выбран — в сообщении ищем только число."""
+    symbol = (await state.get_data()).get("symbol")
+    if not symbol:
+        await state.clear()
+        text, markup = await screen_alerts(message.from_user.id)
+        await message.answer(text, reply_markup=markup)
+        return
+
+    parsed = alerts_input.parse_value(message.text or "")
+    if parsed is None:
+        await message.answer(
+            "Не понял число. Напишите цену — <code>95000</code> — "
+            "или движение — <code>-1.5%</code>.",
+            reply_markup=kb.cancel("nav:alerts"),
+        )
+        return
+
+    text, markup = await _make_alert(message.from_user.id, symbol, parsed)
+    await state.clear()
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("alert:del:"))
+async def alert_drop(call: CallbackQuery) -> None:
+    alert_id = int(call.data.rsplit(":", 1)[1])
+    ok = await repo.cancel_alert(alert_id, owner_id=call.from_user.id)
+    await call.answer("Убрал" if ok else "Уже снято")
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+@router.callback_query(F.data == "alert:clear")
+async def alert_drop_all(call: CallbackQuery) -> None:
+    count = await repo.cancel_all_alerts(call.from_user.id)
+    await call.answer(f"Убрано: {count}")
+    text, markup = await screen_alerts(call.from_user.id)
+    await _render(call, text, markup)
+
+
+# --------------------------------------------------------------------------
 # Всё остальное
 # --------------------------------------------------------------------------
 
 
+async def _alert_from_text(uid: int, text: str) -> tuple[str, object] | None:
+    """Пробует понять «биткоин 95000» или «золото -1.5%»."""
+    parsed = alerts_input.parse_request(text)
+    if parsed is None:
+        return None
+
+    known = list(config.get("symbols", user_id=uid) or [])
+    symbol = alerts_input.resolve_any(parsed.names, known)
+    if symbol is None:
+        return (
+            "🤔 Число я понял, а вот инструмент — нет.\n\n"
+            "Напишите название перед числом:\n"
+            "<code>биткоин 95000</code> — сообщу при этой цене\n"
+            "<code>золото -1.5%</code> — если упадёт на столько\n\n"
+            "Или нажмите <b>🔔 Уведомления</b> — там всё выбирается кнопками.",
+            kb.alert_done(),
+        )
+    return await _make_alert(uid, symbol, parsed)
+
+
 @router.message()
 async def fallback(message: Message) -> None:
-    """Любое другое сообщение. Не ругаемся, а показываем, куда нажимать."""
+    """Любое другое сообщение.
+
+    Сначала пробуем прочитать его как заказ уведомления: «биткоин 95000».
+    Это самый естественный способ поставить будильник по цене — человек
+    пишет то, что хочет, а не ищет кнопку.
+    """
+    answer = await _alert_from_text(message.from_user.id, message.text or "")
+    if answer:
+        await message.answer(answer[0], reply_markup=answer[1])
+        return
+
     await message.answer(
-        "Я понимаю только кнопки внизу экрана 👇\n\n"
+        "Не понял 🤔\n\n"
+        "Нажмите кнопку внизу экрана:\n"
         "🎯 <b>Сигналы</b> — что сейчас в работе\n"
         "📊 <b>Результаты</b> — угадываю я или нет\n"
-        "⚙️ <b>Настройки</b> — за чем следить и как часто писать\n"
-        "❓ <b>Помощь</b> — если что-то непонятно",
+        "🔔 <b>Уведомления</b> — сообщу, когда цена дойдёт до нужной\n"
+        "⚙️ <b>Настройки</b> — за чем следить и как часто писать\n\n"
+        "Или напишите словами: <code>биткоин 95000</code>",
         reply_markup=kb.main_menu(),
     )

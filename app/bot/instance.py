@@ -7,7 +7,12 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, MenuButtonCommands
+from aiogram.types import (
+    BotCommand,
+    MenuButtonCommands,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 
 from app.bot.handlers import router
 from app.config import settings
@@ -18,6 +23,7 @@ COMMANDS = [
     BotCommand(command="start", description="Начать сначала"),
     BotCommand(command="signals", description="Что сейчас в работе"),
     BotCommand(command="stats", description="Угадываю я или нет"),
+    BotCommand(command="alerts", description="Сообщить, когда цена дойдёт до нужной"),
     BotCommand(command="settings", description="Настройки"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="test", description="Проверить, что сообщения доходят"),
@@ -48,9 +54,18 @@ async def setup_bot_profile(bot: Bot) -> None:
         log.warning("Не удалось установить список команд: %s", exc)
 
     # Кнопка меню хранится на стороне Telegram и переживает перезапуск.
-    # Ставим её явно: иначе у установок, где раньше было мини-приложение,
-    # осталась бы ссылка в никуда.
+    # Поэтому её всегда выставляем явно: при пустом WEBAPP_URL — обратно
+    # в список команд, иначе осталась бы ссылка в никуда.
     try:
-        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        if settings.webapp_enabled:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Приложение", web_app=WebAppInfo(url=settings.webapp_url)
+                )
+            )
+            log.info("Мини-приложение: %s", settings.webapp_url)
+        else:
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            log.info("WEBAPP_URL не задан — работаем только сообщениями")
     except Exception as exc:
         log.warning("Не удалось настроить кнопку меню: %s", exc)

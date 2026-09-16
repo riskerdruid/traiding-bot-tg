@@ -118,6 +118,23 @@ def unique_title(symbol: str, existing: list[Choice]) -> str:
     return f"{title} · {name.split(':')[0]}"
 
 
+def quick_list(chosen: list[str]) -> list[Choice]:
+    """Список инструментов без похода в сеть — для выбора в уведомлениях.
+
+    Здесь важнее мгновенный ответ, чем точность: человек ставит будильник
+    по цене, и если инструмента вдруг не окажется, он узнает об этом сразу
+    из ответа бота, а не из пустого экрана.
+    """
+    out: list[Choice] = []
+    for symbol in chosen or []:
+        out.append(Choice(symbol, unique_title(symbol, out), "вы за ним следите", True))
+    for symbol, title in EXCHANGE_CHOICES:
+        if any(c.symbol == symbol for c in out):
+            continue
+        out.append(Choice(symbol, unique_title(symbol, out), "биржа", False))
+    return out
+
+
 async def _exchange_choices(picked: list[str]) -> list[Choice]:
     wanted = [s for s, _ in EXCHANGE_CHOICES]
     titles = dict(EXCHANGE_CHOICES)

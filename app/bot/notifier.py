@@ -157,6 +157,19 @@ class Notifier:
         ok = await self._deliver(owner_id, text)
         return {"ok": ok, "error": "" if ok else "Telegram не принял сообщение."}
 
+    async def send_price_alert(self, alert: repo.Alert, price: float) -> None:
+        """Цена дошла до уровня, который человек заказал сам.
+
+        Ночной режим здесь не действует: человек назвал уровень и ждёт
+        сообщения именно в этот момент. Не хочет ночных — не заказывает
+        ночной уровень.
+        """
+        await self._send(
+            fmt.alert_fired(alert, price),
+            to_owner=alert.owner_id,
+            markup=kb.alert_done(),
+        )
+
     async def send_alert(self, message: str) -> None:
         """Техническая тревога — всем владельцам, без оглядки на ночь."""
         await self._send(f"⚠️ <b>Внимание</b>\n\n{message}")

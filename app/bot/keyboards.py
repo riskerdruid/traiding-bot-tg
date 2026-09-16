@@ -1,8 +1,8 @@
 """Клавиатуры бота.
 
-Внизу экрана — четыре постоянные кнопки: из любого места видно, куда
-нажимать. Внутри разделов — инлайн-кнопки, они перерисовывают то же
-сообщение, а не засыпают чат новыми.
+Внизу экрана — постоянные кнопки: из любого места видно, куда нажимать.
+Внутри разделов — инлайн-кнопки, они перерисовывают то же сообщение,
+а не засыпают чат новыми.
 """
 
 from __future__ import annotations
@@ -12,38 +12,66 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
+from app.config import settings
 from app.storage.settings_store import PRESETS
 
 # Подписи постоянных кнопок. Обработчики сверяются именно с ними.
 BTN_SIGNALS = "🎯 Сигналы"
 BTN_STATS = "📊 Результаты"
+BTN_ALERTS = "🔔 Уведомления"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❓ Помощь"
+BTN_APP = "📱 Приложение"
 
-# Суммы, которые предлагаются вместо ввода числа руками
+# Суммы и проценты, которые предлагаются вместо ввода числа руками
 DEPOSITS = (100, 500, 1000, 5000, 10000)
 RISKS = (0.5, 1.0, 2.0)
+QUICK_MOVES = (-1, -3, -5, 1, 3, 5)
+
+
+def _webapp() -> WebAppInfo | None:
+    """Telegram отклоняет кнопки приложения с пустым или http-адресом.
+
+    При незаполненном WEBAPP_URL просто не показываем их — бот остаётся
+    полностью рабочим, всё то же самое есть в сообщениях.
+    """
+    if not settings.webapp_enabled:
+        return None
+    return WebAppInfo(url=settings.webapp_url)
+
+
+def open_app_button(text: str = "📱 Открыть приложение") -> InlineKeyboardButton | None:
+    app = _webapp()
+    return InlineKeyboardButton(text=text, web_app=app) if app else None
 
 
 def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_SIGNALS), KeyboardButton(text=BTN_STATS)],
-            [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_HELP)],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+    rows: list[list[KeyboardButton]] = []
+    app = _webapp()
+    if app:
+        rows.append([KeyboardButton(text=BTN_APP, web_app=app)])
+    rows += [
+        [KeyboardButton(text=BTN_SIGNALS), KeyboardButton(text=BTN_STATS)],
+        [KeyboardButton(text=BTN_ALERTS), KeyboardButton(text=BTN_SETTINGS)],
+        [KeyboardButton(text=BTN_HELP)],
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
-def refresh_button() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="nav:signals")]
-        ]
-    )
+def signals_screen() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🔄 Обновить", callback_data="nav:signals")]]
+    app = open_app_button("📱 Посмотреть в приложении")
+    if app:
+        rows.append([app])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def stats_screen() -> InlineKeyboardMarkup | None:
+    app = open_app_button("📱 Подробнее в приложении")
+    return InlineKeyboardMarkup(inline_keyboard=[[app]]) if app else None
 
 
 def settings_screen(night_on: bool) -> InlineKeyboardMarkup:
@@ -146,6 +174,76 @@ def pocket_screen(configured: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# --------------------------------------------------------------------------
+# Уведомления по цене
+# --------------------------------------------------------------------------
+
+
+def alerts_screen(alerts: list) -> InlineKeyboardMarkup:
+    """Список заказанных уровней: каждый со своей кнопкой снятия."""
+    from app.bot.formatters import money, short_symbol
+
+    rows = [
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="alert:add")]
+    ]
+    for alert in alerts[:20]:
+        rows.append([InlineKeyboardButton(
+            text=f"✖️ {short_symbol(alert.symbol)} · {money(alert.price)}",
+            callback_data=f"alert:del:{alert.id}",
+        )])
+    if len(alerts) > 1:
+        rows.append([InlineKeyboardButton(
+            text="🧹 Убрать все", callback_data="alert:clear"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def alert_symbols(choices: list) -> InlineKeyboardMarkup:
+    """Первый шаг мастера: по какому инструменту ставим будильник."""
+    rows = [
+        [InlineKeyboardButton(text=c.title, callback_data=f"alert:sym:{c.symbol}")]
+        for c in choices[:12]
+    ]
+    rows.append([InlineKeyboardButton(text="‹ Назад", callback_data="nav:alerts")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def alert_values(symbol: str) -> InlineKeyboardMarkup:
+    """Второй шаг: готовые проценты движения — одно нажатие вместо ввода."""
+    def button(value: int) -> InlineKeyboardButton:
+        sign = "+" if value > 0 else "−"
+        return InlineKeyboardButton(
+            text=f"{sign}{abs(value)}%", callback_data=f"alert:pct:{value}"
+        )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [button(v) for v in QUICK_MOVES if v < 0],
+            [button(v) for v in QUICK_MOVES if v > 0],
+            [InlineKeyboardButton(
+                text="✏️ Своя цена", callback_data="alert:custom"
+            )],
+            [InlineKeyboardButton(text="‹ Назад", callback_data="alert:add")],
+        ]
+    )
+
+
+def alert_done() -> InlineKeyboardMarkup:
+    """Кнопка под подтверждением и под сработавшим уведомлением."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔔 Мои уведомления", callback_data="nav:alerts"
+            )]
+        ]
+    )
+
+
+# --------------------------------------------------------------------------
+# Справка
+# --------------------------------------------------------------------------
+
+
 def help_menu() -> InlineKeyboardMarkup:
     from app import help as help_content
 
@@ -167,9 +265,7 @@ def help_topic() -> InlineKeyboardMarkup:
     )
 
 
-def cancel() -> InlineKeyboardMarkup:
+def cancel(to: str = "nav:settings") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Отмена", callback_data="nav:settings")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data=to)]]
     )

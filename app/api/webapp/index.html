@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Сигналы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-title" id="greeting">Сигналы</div>
+  <div class="pulse" id="pulse">Загружаю…</div>
+</header>
+
+<main id="screen">
+  <div class="loader" id="loader">
+    <div class="spinner"></div>
+    <p>Секунду, собираю данные…</p>
+  </div>
+</main>
+
+<nav class="tabs" id="tabs">
+  <button class="tab is-active" data-tab="signals">
+    <span class="tab-icon">🎯</span><span class="tab-name">Сигналы</span>
+  </button>
+  <button class="tab" data-tab="stats">
+    <span class="tab-icon">📊</span><span class="tab-name">Итоги</span>
+  </button>
+  <button class="tab" data-tab="alerts">
+    <span class="tab-icon">🔔</span><span class="tab-name">Цена</span>
+  </button>
+  <button class="tab" data-tab="settings">
+    <span class="tab-icon">⚙️</span><span class="tab-name">Настройки</span>
+  </button>
+</nav>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-backdrop" data-close></div>
+  <div class="sheet-body" id="sheet-body"></div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

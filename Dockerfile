@@ -31,4 +31,6 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import os,sys,time; p='/app/data/heartbeat'; \
         sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"
 
+EXPOSE 8080
+
 CMD ["python", "run.py"]
